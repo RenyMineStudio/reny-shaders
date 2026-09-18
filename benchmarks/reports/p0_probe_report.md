@@ -1,7 +1,7 @@
 # Reny Shaders — P0 Capability Probe Report
 
-- **Date:** `2026-09-18T17:15:04.654911+00:00`
-- **Commit SHA:** `2606f53099566b621ec3c6be2a84805109ee574b`
+- **Date:** `2026-09-18T17:59:57.528582+00:00`
+- **Commit SHA:** `ac7aaa020955a81928bd1964af1a88676085bb1e`
 - **Working Tree Clean:** `Yes`
 - **Minecraft:** `1.7.10`
 - **Forge:** `10.13.4.1614`

@@ -13,7 +13,7 @@ Screen captures generated during P0 testing are stored in `/tmp/opencode/p0_prob
 All captures taken at **1280x720** resolution on the target stack:
 - Minecraft 1.7.10 / Forge 10.13.4.1614 / OptiFine 1.7.10 HD U E7 / Java 8 (Temurin 1.8.0_312)
 - GPU: Mesa Intel(R) Iris(R) Xe Graphics (ADL GT2) / OpenGL 4.6 Mesa 25.2.8
-- Tested Commit: `2606f53099566b621ec3c6be2a84805109ee574b` (and final verified HEAD)
+- Tested Commit: `ac7aaa020955a81928bd1964af1a88676085bb1e`
 
 | Scenario ID | Artifact File | Probe Mode / Context | SHA-256 Digest | Gate & Observations |
 |---|---|---|---|---|
