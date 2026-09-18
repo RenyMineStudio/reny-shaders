@@ -2,6 +2,15 @@
 """
 Reny Shaders — Automated P0 Capability Probe & Validation Suite
 Target: Minecraft 1.7.10 / Forge 10.13.4.1614 / OptiFine 1.7.10 HD U E7
+
+Fail-closed contract:
+- Every X11 subprocess return code is inspected; any unexpected failure
+  propagates as an explicit gate FAIL (never silent success).
+- Log waits only accept evidence produced AFTER a captured cursor
+  (stale matches from earlier in the session never satisfy a gate).
+- Log read failures produce diagnostics + coherent FAIL/INCONCLUSIVE,
+  never `except Exception: pass`.
+- Overall exit code is non-zero when any FAIL gate exists.
 """
 
 from __future__ import annotations
@@ -9,13 +18,12 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
-import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -25,25 +33,54 @@ SHADERS_DIR = REPO_ROOT / "shaders"
 DEFAULT_INSTANCE = Path(
     os.environ.get(
         "MINECRAFT_INSTANCE_DIR",
-        Path.home() / "Documents/curseforge/minecraft/Instances/Reny Shaders Probe",
+        str(Path.home() / "Documents/curseforge/minecraft/Instances/Reny Shaders Probe"),
     )
 )
 LOG_PATH = DEFAULT_INSTANCE / "logs" / "latest.log"
+OPTIONS_SHADERS_PATH = DEFAULT_INSTANCE / "optionsshaders.txt"
 MANIFEST_PATH = REPO_ROOT / "benchmarks" / "artifacts" / "p0_probe" / "MANIFEST.md"
 SCREENSHOT_DIR = Path(
     os.environ.get("P0_SCREENSHOT_DIR", "/tmp/opencode/p0_probe_artifacts")
 )
 
 
-def run_cmd(args: List[str], timeout: float = 30.0) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        args,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+# ---------------------------------------------------------------------------
+# Checked subprocess execution (fail-closed)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CheckedResult:
+    ok: bool
+    returncode: Optional[int]
+    stdout: str = ""
+    stderr: str = ""
+    error: Optional[str] = None
+
+
+def run_checked(args: List[str], timeout: float = 30.0) -> CheckedResult:
+    """Run a subprocess and never hide transport failures."""
+    try:
+        proc = subprocess.run(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return CheckedResult(
+            ok=proc.returncode == 0,
+            returncode=proc.returncode,
+            stdout=proc.stdout or "",
+            stderr=proc.stderr or "",
+            error=None if proc.returncode == 0 else f"exit={proc.returncode}: {(proc.stderr or proc.stdout or '')[:300]}",
+        )
+    except FileNotFoundError as exc:
+        return CheckedResult(ok=False, returncode=None, error=f"binary-not-found: {exc}")
+    except subprocess.TimeoutExpired as exc:
+        return CheckedResult(ok=False, returncode=None, error=f"timeout after {timeout}s: {exc}")
+    except OSError as exc:
+        return CheckedResult(ok=False, returncode=None, error=f"os-error: {exc}")
 
 
 def compute_sha256(path: Path) -> str:
@@ -54,10 +91,148 @@ def compute_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# Fresh-log cursor: only evidence produced AFTER capture counts
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LogCursor:
+    path: Path
+    inode: Optional[int] = None
+    size: int = 0
+    captured_at: float = 0.0
+    error: Optional[str] = None
+
+    @classmethod
+    def capture(cls, path: Path) -> "LogCursor":
+        cur = cls(path=path, captured_at=time.time())
+        try:
+            st = path.stat()
+            cur.inode = st.st_ino
+            cur.size = st.st_size
+        except FileNotFoundError:
+            cur.error = f"log file not found at capture: {path}"
+        except OSError as exc:
+            cur.error = f"log stat failed at capture: {exc}"
+        return cur
+
+
+@dataclass
+class FreshLogRead:
+    lines: str = ""
+    truncated_or_rotated: bool = False
+    error: Optional[str] = None
+
+
+def read_fresh_log(cursor: LogCursor) -> FreshLogRead:
+    """Read only bytes appended after cursor; handle rotation/truncation explicitly."""
+    try:
+        st = cursor.path.stat()
+    except FileNotFoundError as exc:
+        return FreshLogRead(error=f"log file missing on read: {exc}")
+    except OSError as exc:
+        return FreshLogRead(error=f"log stat failed on read: {exc}")
+
+    truncated_or_rotated = False
+    start_offset = cursor.size
+    if cursor.inode is not None and st.st_ino != cursor.inode:
+        # File rotated/recreated: everything present is new evidence.
+        truncated_or_rotated = True
+        start_offset = 0
+    elif st.st_size < cursor.size:
+        # Truncated in place (log rotation): everything present is new evidence.
+        truncated_or_rotated = True
+        start_offset = 0
+
+    try:
+        with cursor.path.open("rb") as f:
+            f.seek(start_offset)
+            raw = f.read()
+        text = raw.decode("utf-8", errors="replace")
+        return FreshLogRead(lines=text, truncated_or_rotated=truncated_or_rotated)
+    except OSError as exc:
+        return FreshLogRead(error=f"log read failed at offset {start_offset}: {exc}")
+
+
+@dataclass
+class LogWaitResult:
+    matched: bool
+    evidence: str = ""
+    error: Optional[str] = None
+    truncated_or_rotated: bool = False
+
+
+def wait_for_fresh_log(
+    cursor: LogCursor,
+    pattern: str,
+    timeout: float = 30.0,
+    poll_interval: float = 0.5,
+) -> LogWaitResult:
+    """
+    Wait for `pattern` in log content appended AFTER cursor.
+    Stale occurrences from earlier in the session never satisfy the wait.
+    """
+    if cursor.error is not None:
+        return LogWaitResult(
+            matched=False,
+            evidence="",
+            error=f"cursor capture failed, cannot trust wait: {cursor.error}",
+        )
+    try:
+        regex = re.compile(pattern)
+    except re.error as exc:
+        return LogWaitResult(matched=False, evidence="", error=f"invalid regex {pattern!r}: {exc}")
+
+    deadline = time.time() + timeout
+    last_error: Optional[str] = None
+    saw_rotation = False
+    while time.time() < deadline:
+        fresh = read_fresh_log(cursor)
+        if fresh.error is not None:
+            last_error = fresh.error
+            time.sleep(poll_interval)
+            continue
+        if fresh.truncated_or_rotated:
+            saw_rotation = True
+        m = regex.search(fresh.lines)
+        if m:
+            context = m.group(0)[:220]
+            return LogWaitResult(
+                matched=True,
+                evidence=f"fresh match after cursor: {context!r}",
+                truncated_or_rotated=saw_rotation,
+            )
+        time.sleep(poll_interval)
+    return LogWaitResult(
+        matched=False,
+        evidence=f"no fresh match for {pattern!r} within {timeout}s (rotation seen: {saw_rotation})",
+        error=last_error or f"timeout waiting for fresh log pattern {pattern!r}",
+        truncated_or_rotated=saw_rotation,
+    )
+
+
+def read_probe_mode_option(options_path: Path = OPTIONS_SHADERS_PATH) -> Tuple[Optional[int], Optional[str]]:
+    """Read persisted PROBE_MODE from optionsshaders.txt (runtime file, not tracked)."""
+    try:
+        text = options_path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return None, f"optionsshaders.txt not found: {options_path}"
+    except OSError as exc:
+        return None, f"optionsshaders.txt read failed: {exc}"
+    m = re.search(r"^PROBE_MODE\s*[:=]\s*(\d+)\s*$", text, re.MULTILINE)
+    if not m:
+        return None, "PROBE_MODE key absent in optionsshaders.txt"
+    try:
+        return int(m.group(1)), None
+    except ValueError as exc:
+        return None, f"PROBE_MODE value not an int: {exc}"
+
+
 class GateResult:
     def __init__(self, name: str, status: str, evidence: str, error: Optional[str] = None) -> None:
+        assert status in ("PASS", "FAIL", "INCONCLUSIVE")
         self.name = name
-        self.status = status  # PASS, FAIL, INCONCLUSIVE
+        self.status = status
         self.evidence = evidence
         self.error = error
 
@@ -77,6 +252,8 @@ class P0Suite:
         update_repo_manifest: bool = False,
     ) -> None:
         self.instance_dir = instance_dir
+        self.log_path = instance_dir / "logs" / "latest.log"
+        self.options_path = instance_dir / "optionsshaders.txt"
         self.screenshot_dir = SCREENSHOT_DIR
         self.screenshot_dir.mkdir(parents=True, exist_ok=True)
         self.manifest_path = (
@@ -89,6 +266,7 @@ class P0Suite:
         self.captures: List[Dict[str, Any]] = []
         self.overall_success = True
 
+    # -- gate bookkeeping ----------------------------------------------------
     def record_gate(self, name: str, status: str, evidence: str, error: Optional[str] = None) -> None:
         gate = GateResult(name, status, evidence, error)
         self.gates.append(gate)
@@ -97,80 +275,116 @@ class P0Suite:
         if status == "FAIL":
             self.overall_success = False
 
-    def get_window(self) -> Optional[str]:
-        res = run_cmd(["xdotool", "search", "--onlyvisible", "--name", "Minecraft 1.7.10"])
+    # -- X11 primitives (all fail-closed) ------------------------------------
+    def get_window(self) -> Tuple[Optional[str], Optional[str]]:
+        res = run_checked(["xdotool", "search", "--onlyvisible", "--name", "Minecraft 1.7.10"])
+        if not res.ok:
+            return None, f"xdotool search failed: {res.error}"
         windows = [line.strip() for line in res.stdout.splitlines() if line.strip()]
-        return windows[-1] if windows else None
+        if not windows:
+            return None, "xdotool search returned zero windows"
+        return windows[-1], None
 
-    def get_window_geometry(self, win: str) -> Optional[Tuple[int, int, int, int]]:
-        res = run_cmd(["xwininfo", "-id", win])
-        if res.returncode != 0:
-            return None
+    def get_window_geometry(self, win: str) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[str]]:
+        res = run_checked(["xwininfo", "-id", win])
+        if not res.ok:
+            return None, f"xwininfo failed: {res.error}"
         try:
-            x = int(re.search(r"Absolute upper-left X:\s+(\d+)", res.stdout).group(1))
-            y = int(re.search(r"Absolute upper-left Y:\s+(\d+)", res.stdout).group(1))
-            w = int(re.search(r"Width:\s+(\d+)", res.stdout).group(1))
-            h = int(re.search(r"Height:\s+(\d+)", res.stdout).group(1))
-            return x, y, w, h
-        except (AttributeError, ValueError):
-            return None
+            x = int(re.search(r"Absolute upper-left X:\s+(\d+)", res.stdout).group(1))  # type: ignore[union-attr]
+            y = int(re.search(r"Absolute upper-left Y:\s+(\d+)", res.stdout).group(1))  # type: ignore[union-attr]
+            w = int(re.search(r"Width:\s+(\d+)", res.stdout).group(1))  # type: ignore[union-attr]
+            h = int(re.search(r"Height:\s+(\d+)", res.stdout).group(1))  # type: ignore[union-attr]
+            return (x, y, w, h), None
+        except (AttributeError, ValueError) as exc:
+            return None, f"xwininfo parse failed: {exc}"
 
-    def focus_window(self) -> bool:
-        w = self.get_window()
+    def focus_window(self) -> Tuple[bool, Optional[str]]:
+        w, err = self.get_window()
         if not w:
-            return False
-        res = run_cmd(["xdotool", "windowactivate", w])
-        run_cmd(["xdotool", "windowraise", w])
+            return False, err or "no window to focus"
+        r1 = run_checked(["xdotool", "windowactivate", w])
+        r2 = run_checked(["xdotool", "windowraise", w])
         time.sleep(0.3)
-        return res.returncode == 0
+        if not r1.ok:
+            return False, f"windowactivate failed: {r1.error}"
+        if not r2.ok:
+            return False, f"windowraise failed: {r2.error}"
+        return True, None
 
-    def click_relative(self, rx: float, ry: float, delay: float = 0.5) -> bool:
-        w = self.get_window()
+    def click_relative(self, rx: float, ry: float, delay: float = 0.5) -> Tuple[bool, Optional[str]]:
+        w, err = self.get_window()
         if not w:
-            return False
-        geom = self.get_window_geometry(w)
+            return False, err or "click aborted: no window"
+        geom, gerr = self.get_window_geometry(w)
         if not geom:
-            return False
+            return False, gerr or "click aborted: no geometry"
         x, y, width, height = geom
         cx = x + int(width * rx)
         cy = y + int(height * ry)
-        run_cmd(["xdotool", "mousemove", str(cx), str(cy)])
-        time.sleep(0.08)
-        run_cmd(["xdotool", "mousedown", "1"])
-        time.sleep(0.12)
-        run_cmd(["xdotool", "mouseup", "1"])
+        for step, cmd in (
+            ("mousemove", ["xdotool", "mousemove", str(cx), str(cy)]),
+            ("mousedown", ["xdotool", "mousedown", "1"]),
+            ("mouseup", ["xdotool", "mouseup", "1"]),
+        ):
+            res = run_checked(cmd)
+            if not res.ok:
+                return False, f"click {step} failed at ({cx},{cy}): {res.error}"
+            time.sleep(0.08 if step != "mouseup" else 0.0)
         time.sleep(delay)
-        return True
+        return True, None
 
-    def send_chat_command(self, command: str) -> bool:
-        w = self.get_window()
+    def send_chat_command(self, command: str) -> Tuple[bool, Optional[str]]:
+        w, err = self.get_window()
         if not w:
-            return False
-        self.focus_window()
-        run_cmd(["xdotool", "key", "t"])
-        time.sleep(0.2)
-        run_cmd(["xdotool", "key", "ctrl+a"])
-        run_cmd(["xdotool", "key", "BackSpace"])
-        time.sleep(0.1)
-        run_cmd(["xdotool", "type", "--delay", "30", "--clearmodifiers", command])
-        time.sleep(0.15)
-        run_cmd(["xdotool", "key", "Return"])
+            return False, err or "chat command aborted: no window"
+        ok, ferr = self.focus_window()
+        if not ok:
+            return False, f"chat command aborted, focus failed: {ferr}"
+        steps = [
+            ["xdotool", "key", "t"],
+            ["xdotool", "key", "ctrl+a"],
+            ["xdotool", "key", "BackSpace"],
+            ["xdotool", "type", "--delay", "30", "--clearmodifiers", command],
+            ["xdotool", "key", "Return"],
+        ]
+        for cmd in steps:
+            res = run_checked(cmd)
+            if not res.ok:
+                return False, f"chat step {' '.join(cmd)} failed: {res.error}"
+            time.sleep(0.15)
         time.sleep(0.5)
-        return True
+        return True, None
 
-    def capture_screen(self, scenario_name: str, observation: str) -> Tuple[bool, Optional[Path]]:
-        w = self.get_window()
+    def resize_window(self, geometry: str) -> Tuple[bool, Optional[str]]:
+        res = run_checked(["wmctrl", "-r", "Minecraft 1.7.10", "-e", geometry])
+        if not res.ok:
+            return False, f"wmctrl resize {geometry!r} failed: {res.error}"
+        return True, None
+
+    def capture_screen(self, scenario_name: str, observation: str) -> Tuple[bool, Optional[Path], Optional[str]]:
+        w, err = self.get_window()
         if not w:
-            return False, None
+            return False, None, err or "screenshot aborted: no window"
 
         path = self.screenshot_dir / f"{scenario_name}.png"
-        res = run_cmd(["scrot", "-o", "-w", w, str(path)])
-        if res.returncode != 0 or not path.is_file() or path.stat().st_size == 0:
-            return False, None
+        res = run_checked(["scrot", "-o", "-w", w, str(path)])
+        if not res.ok:
+            return False, None, f"scrot failed: {res.error}"
+        try:
+            if not path.is_file():
+                return False, None, f"scrot exit 0 but file missing: {path}"
+            size = path.stat().st_size
+        except OSError as exc:
+            return False, None, f"screenshot stat failed: {exc}"
+        if size == 0:
+            return False, None, f"screenshot is zero bytes: {path}"
 
-        geom = self.get_window_geometry(w)
-        res_str = f"{geom[2]}x{geom[3]}" if geom else "1280x720"
-        sha256 = compute_sha256(path)
+        geom, _ = self.get_window_geometry(w)
+        res_str = f"{geom[2]}x{geom[3]}" if geom else "unknown"
+        try:
+            sha256 = compute_sha256(path)
+        except OSError as exc:
+            return False, None, f"sha256 failed: {exc}"
         iso_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
         self.captures.append({
@@ -179,355 +393,495 @@ class P0Suite:
             "path": str(path),
             "resolution": res_str,
             "sha256": sha256,
-            "size_bytes": path.stat().st_size,
+            "size_bytes": size,
             "timestamp": iso_time,
             "observation": observation,
         })
-        return True, path
+        return True, path, None
 
-    def wait_for_log(self, pattern: str, timeout: float = 30.0) -> bool:
-        start = time.time()
-        regex = re.compile(pattern)
-        while time.time() - start < timeout:
-            if LOG_PATH.exists():
-                try:
-                    text = LOG_PATH.read_text(encoding="utf-8", errors="replace")
-                    if regex.search(text):
-                        return True
-                except Exception:
-                    pass
+    # -- composite GUI flows (propagate every internal failure) --------------
+    def reload_shaders_via_gui(self) -> Tuple[bool, str, Optional[str]]:
+        """Reload shaders via in-game settings; prove with fresh framebuffer evidence."""
+        w, err = self.get_window()
+        if not w:
+            return False, "", err or "reload aborted: no window"
+
+        cursor = LogCursor.capture(self.log_path)
+        if cursor.error is not None:
+            return False, "", f"reload aborted, log cursor failed: {cursor.error}"
+
+        ok, ferr = self.focus_window()
+        if not ok:
+            return False, "", f"reload aborted, focus failed: {ferr}"
+
+        failures: List[str] = []
+
+        def step(cmd: List[str], sleep_after: float = 0.0) -> None:
+            res = run_checked(cmd)
+            if not res.ok:
+                failures.append(f"{' '.join(cmd)} -> {res.error}")
+            if sleep_after:
+                time.sleep(sleep_after)
+
+        step(["xdotool", "key", "Escape"], 0.5)
+        for rx, ry, d in (
+            (0.38, 0.62, 0.5),  # Options...
+            (0.38, 0.58, 0.5),  # Video Settings...
+            (0.38, 0.68, 0.8),  # Shaders...
+        ):
+            ok_c, cerr = self.click_relative(rx, ry, delay=d)
+            if not ok_c:
+                failures.append(f"click ({rx},{ry}) -> {cerr}")
+        ok_c, cerr = self.click_relative(0.50, 0.93, delay=2.5)  # Done in Shaders
+        if not ok_c:
+            failures.append(f"click Done/Shaders -> {cerr}")
+        ok_c, cerr = self.click_relative(0.50, 0.93, delay=0.5)
+        if not ok_c:
+            failures.append(f"click Done/Video -> {cerr}")
+        ok_c, cerr = self.click_relative(0.50, 0.93, delay=0.5)
+        if not ok_c:
+            failures.append(f"click Done/Options -> {cerr}")
+        step(["xdotool", "key", "Escape"], 1.0)
+
+        if failures:
+            return False, "", f"reload GUI steps failed: {'; '.join(failures)}"
+
+        wait = wait_for_fresh_log(cursor, r"Framebuffer created\.|Program loaded: final", timeout=30.0)
+        if not wait.matched:
+            return False, "", f"reload not evidenced in fresh log: {wait.evidence} (error: {wait.error})"
+        return True, wait.evidence, None
+
+    def cycle_shader_option_mode(self) -> Tuple[bool, Optional[int], Optional[int], Optional[str]]:
+        """Cycle PROBE_MODE via Shader Options; verify persistence in optionsshaders.txt."""
+        w, err = self.get_window()
+        if not w:
+            return False, None, None, err or "mode cycle aborted: no window"
+
+        before, rerr = read_probe_mode_option(self.options_path)
+        if rerr is not None:
+            # Missing key before the cycle is a hard diagnostic, not silent.
+            return False, before, None, f"pre-cycle PROBE_MODE unreadable: {rerr}"
+
+        ok, ferr = self.focus_window()
+        if not ok:
+            return False, before, None, f"mode cycle aborted, focus failed: {ferr}"
+
+        failures: List[str] = []
+        res = run_checked(["xdotool", "key", "Escape"])
+        if not res.ok:
+            failures.append(f"Escape -> {res.error}")
+        time.sleep(0.5)
+        for rx, ry, d in (
+            (0.38, 0.62, 0.5),
+            (0.38, 0.58, 0.5),
+            (0.38, 0.68, 0.8),
+            (0.83, 0.93, 1.0),  # Shader Options...
+            (0.20, 0.25, 0.8),  # Probe Mode button
+            (0.68, 0.95, 2.5),  # Done in Shader Options
+            (0.50, 0.93, 0.5),
+            (0.50, 0.93, 0.5),
+            (0.50, 0.93, 0.5),
+        ):
+            ok_c, cerr = self.click_relative(rx, ry, delay=d)
+            if not ok_c:
+                failures.append(f"click ({rx},{ry}) -> {cerr}")
+        res = run_checked(["xdotool", "key", "Escape"])
+        if not res.ok:
+            failures.append(f"final Escape -> {res.error}")
+        time.sleep(1.0)
+
+        if failures:
+            return False, before, None, f"mode cycle GUI steps failed: {'; '.join(failures)}"
+
+        # Poll runtime options file: OptiFine persists asynchronously after Done.
+        after: Optional[int] = None
+        last_err: Optional[str] = None
+        for _ in range(10):
+            after, last_err = read_probe_mode_option(self.options_path)
+            if last_err is None and after is not None and after != before:
+                break
             time.sleep(0.5)
-        return False
+        if last_err is not None or after is None:
+            return False, before, after, f"post-cycle PROBE_MODE unreadable: {last_err}"
+        if after == before:
+            return False, before, after, f"PROBE_MODE did not advance (before={before}, after={after})"
+        if not (0 <= after <= 5):
+            return False, before, after, f"PROBE_MODE out of range after cycle: {after}"
+        return True, before, after, None
 
-    def reload_shaders_via_gui(self) -> bool:
-        """Reload shaders via in-game settings navigation without modifying tracked files."""
-        w = self.get_window()
-        if not w:
-            return False
-
-        self.focus_window()
-        # Escape -> Options -> Video Settings -> Shaders -> Done -> Done -> Done -> Escape
-        run_cmd(["xdotool", "key", "Escape"])
-        time.sleep(0.5)
-        self.click_relative(0.38, 0.62)  # Options...
-        self.click_relative(0.38, 0.58)  # Video Settings...
-        self.click_relative(0.38, 0.68)  # Shaders...
-        self.click_relative(0.50, 0.93, delay=2.5)  # Done in Shaders (triggers loadShaderPack)
-        self.click_relative(0.50, 0.93)  # Done in Video Settings
-        self.click_relative(0.50, 0.93)  # Done in Options
-        run_cmd(["xdotool", "key", "Escape"])
-        time.sleep(1.0)
-        return True
-
-    def cycle_shader_option_mode(self) -> bool:
-        """Cycle the PROBE_MODE option inside Shader Options subscreen."""
-        w = self.get_window()
-        if not w:
-            return False
-
-        self.focus_window()
-        run_cmd(["xdotool", "key", "Escape"])
-        time.sleep(0.5)
-        self.click_relative(0.38, 0.62)  # Options...
-        self.click_relative(0.38, 0.58)  # Video Settings...
-        self.click_relative(0.38, 0.68)  # Shaders...
-        self.click_relative(0.83, 0.93, delay=1.0)  # Shader Options...
-        self.click_relative(0.20, 0.25, delay=0.8)  # Click Probe Mode button
-        self.click_relative(0.68, 0.95, delay=2.5)  # Done in Shader Options
-        self.click_relative(0.50, 0.93)  # Done in Shaders
-        self.click_relative(0.50, 0.93)  # Done in Video Settings
-        self.click_relative(0.50, 0.93)  # Done in Options
-        run_cmd(["xdotool", "key", "Escape"])
-        time.sleep(1.0)
-        return True
-
-    def perform_camera_motion(self, duration: float = 2.0) -> None:
-        self.focus_window()
-        run_cmd(["xdotool", "keydown", "w"])
+    def perform_camera_motion(self, duration: float = 2.0) -> Tuple[bool, Optional[str]]:
+        ok, ferr = self.focus_window()
+        if not ok:
+            return False, f"motion aborted, focus failed: {ferr}"
+        failures: List[str] = []
+        res = run_checked(["xdotool", "keydown", "w"])
+        if not res.ok:
+            return False, f"keydown w failed: {res.error}"
         start = time.time()
         while time.time() - start < duration:
-            run_cmd(["xdotool", "mousemove_relative", "--", "8", "0"])
+            res = run_checked(["xdotool", "mousemove_relative", "--", "8", "0"])
+            if not res.ok:
+                failures.append(f"mousemove_relative -> {res.error}")
             time.sleep(0.06)
-        run_cmd(["xdotool", "keyup", "w"])
+        res = run_checked(["xdotool", "keyup", "w"])
+        if not res.ok:
+            failures.append(f"keyup w -> {res.error}")
         time.sleep(0.4)
+        if failures:
+            return False, "; ".join(failures)
+        return True, None
 
-    def write_manifest(self, commit_sha: str) -> None:
-        lines = [
-            "# Reny Shaders — P0 Capability Probe Screenshot Manifest",
-            "",
-            f"- **Commit SHA:** `{commit_sha}`",
-            f"- **Generated:** `{datetime.datetime.now(datetime.timezone.utc).isoformat()}`",
-            "- **Policy:** Binaries are excluded from Git per `AGENTS.md` asset hygiene rules.",
-            "- **Location on PC:** `/tmp/opencode/p0_probe_artifacts/`",
-            "",
-            "## Capture Records",
-            "",
-            "| Scenario | Resolution | SHA-256 Digest | Observation / Gate |",
-            "|---|---|---|---|",
-        ]
+    # -- manifest ------------------------------------------------------------
+    def write_manifest(self, tested_tree_sha: str) -> Tuple[bool, Optional[str]]:
+        try:
+            res_head = run_checked(["git", "rev-parse", "HEAD"])
+            head_now = res_head.stdout.strip() if res_head.ok else "unknown"
+            lines = [
+                "# Reny Shaders — P0 Capability Probe Screenshot Manifest",
+                "",
+                f"- **Tested tree SHA:** `{tested_tree_sha}`",
+                f"- **HEAD at report time:** `{head_now}`",
+                f"- **Generated:** `{datetime.datetime.now(datetime.timezone.utc).isoformat()}`",
+                "- **Policy:** Binaries are excluded from Git per `AGENTS.md` asset hygiene rules.",
+                f"- **Screenshot dir (configurable via P0_SCREENSHOT_DIR):** `{self.screenshot_dir}`",
+                "",
+                "## Gate Results",
+                "",
+                "| Gate | Status | Evidence | Error |",
+                "|---|---|---|---|",
+            ]
+            for g in self.gates:
+                lines.append(f"| `{g.name}` | **{g.status}** | {g.evidence} | {g.error or ''} |")
+            lines += [
+                "",
+                "## Capture Records",
+                "",
+                "| Scenario | Resolution | SHA-256 Digest | Observation / Gate |",
+                "|---|---|---|---|",
+            ]
+            for c in self.captures:
+                lines.append(
+                    f"| `{c['scenario']}` | `{c['resolution']}` | `{c['sha256']}` | {c['observation']} |"
+                )
+            lines.extend([
+                "",
+                "## Reproduction Instruction",
+                "",
+                "```bash",
+                "# 1. Launch dedicated probe instance",
+                "./tools/harness/launch_probe_client.sh",
+                "",
+                "# 2. Run the P0 validation suite (records tested_tree_sha, fail-closed)",
+                "python3 tools/harness/run_p0_suite.py",
+                "",
+                "# 3. Evaluate capabilities from fresh evidence (explicit exit code)",
+                "python3 tools/harness/probe_runner.py",
+                "```",
+            ])
+            self.manifest_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            print(f"Wrote screenshot manifest to: {self.manifest_path}")
+            return True, None
+        except OSError as exc:
+            return False, f"manifest write failed: {exc}"
 
-        for c in self.captures:
-            lines.append(
-                f"| `{c['scenario']}` | `{c['resolution']}` | `{c['sha256']}` | {c['observation']} |"
-            )
-
-        lines.extend([
-            "",
-            "## Reproduction Instruction",
-            "",
-            "```bash",
-            "# 1. Launch dedicated probe instance",
-            "./tools/harness/launch_probe_client.sh",
-            "",
-            "# 2. Run the P0 validation suite",
-            "python3 tools/harness/run_p0_suite.py",
-            "",
-            "# 3. Verify evaluation report",
-            "python3 tools/harness/probe_runner.py",
-            "```",
-        ])
-
-        self.manifest_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        print(f"Wrote screenshot manifest to: {self.manifest_path}")
-
-    def run_all(self, commit_sha: str) -> int:
+    # -- main flow -----------------------------------------------------------
+    def run_all(self, tested_tree_sha: str) -> int:
         print("\n=== STARTING P0 VALIDATION SUITE (FAIL-CLOSED) ===\n")
-        w = self.get_window()
+        print(f"Tested tree SHA: {tested_tree_sha}")
+        w, werr = self.get_window()
         if not w:
             self.record_gate(
                 "client_window_present",
                 "FAIL",
                 "Minecraft 1.7.10 window was not detected on X11 display",
-                error="Window query returned empty",
+                error=werr or "Window query returned empty",
             )
+            self.write_manifest(tested_tree_sha)
             return 1
-        self.record_gate(
-            "client_window_present",
-            "PASS",
-            f"Minecraft window active (ID: {w})",
-        )
+        self.record_gate("client_window_present", "PASS", f"Minecraft window active (ID: {w})")
 
-        # ---------------------------------------------------------------------
-        # 1. EXP-P0-STACK: Overworld Baseline Smoke
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 1. EXP-P0-STACK: Overworld baseline
+        # -----------------------------------------------------------------
         print("\n--- Gate: EXP-P0-STACK (Overworld) ---")
-        ok = self.reload_shaders_via_gui()
+        ok, evidence, err = self.reload_shaders_via_gui()
         if not ok:
-            self.record_gate("shader_reload_gui", "FAIL", "Failed to reload shaders via GUI")
+            self.record_gate("shader_reload_gui", "FAIL", "Shader reload via GUI not evidenced", error=err)
         else:
-            self.record_gate("shader_reload_gui", "PASS", "Shaders reloaded via in-game settings GUI")
+            self.record_gate("shader_reload_gui", "PASS", f"Reload evidenced: {evidence}")
 
-        # Overworld Day Still
-        ok, _ = self.capture_screen(
+        ok, _, err = self.capture_screen(
             "exp_p0_stack_overworld_day_still",
             "Overworld day scene rendering with terrain, water, foliage, and mode badge",
         )
         if not ok:
-            self.record_gate("capture_overworld_still", "FAIL", "Failed to capture Overworld still screenshot")
+            self.record_gate("capture_overworld_still", "FAIL", "Overworld still capture failed", error=err)
         else:
             self.record_gate("capture_overworld_still", "PASS", "Captured Overworld still screenshot")
 
-        # Overworld Day Motion
-        self.perform_camera_motion(1.5)
-        ok, _ = self.capture_screen(
+        ok_m, merr = self.perform_camera_motion(1.5)
+        if not ok_m:
+            self.record_gate("camera_motion_overworld", "FAIL", "Camera motion failed", error=merr)
+        else:
+            self.record_gate("camera_motion_overworld", "PASS", "Camera motion executed (W + yaw)")
+        ok, _, err = self.capture_screen(
             "exp_p0_stack_overworld_day_motion",
             "Overworld camera movement without geometry tears or visual corruption",
         )
         if not ok:
-            self.record_gate("capture_overworld_motion", "FAIL", "Failed to capture Overworld motion screenshot")
+            self.record_gate("capture_overworld_motion", "FAIL", "Overworld motion capture failed", error=err)
         else:
             self.record_gate("capture_overworld_motion", "PASS", "Captured Overworld motion screenshot")
 
-        # Overworld Night
-        self.send_chat_command("/time set 18000")
-        time.sleep(1.0)
-        ok, _ = self.capture_screen(
+        ok_c, cerr = self.send_chat_command("/time set 18000")
+        if not ok_c:
+            self.record_gate("time_set_night", "FAIL", "Chat command '/time set 18000' failed", error=cerr)
+        else:
+            time.sleep(1.0)
+            self.record_gate("time_set_night", "PASS", "Night time command delivered")
+        ok, _, err = self.capture_screen(
             "exp_p0_stack_overworld_night",
             "Overworld night scene verifying dark sky, stars, and emissive contrast",
         )
         if not ok:
-            self.record_gate("capture_overworld_night", "FAIL", "Failed to capture Overworld night screenshot")
+            self.record_gate("capture_overworld_night", "FAIL", "Overworld night capture failed", error=err)
         else:
             self.record_gate("capture_overworld_night", "PASS", "Captured Overworld night screenshot")
 
-        # ---------------------------------------------------------------------
-        # 2. EXP-P0-CAP: Modes 1 to 5 via GUI option cycling
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 2. EXP-P0-CAP: Modes 1..5 via verified GUI option cycling
+        # -----------------------------------------------------------------
         print("\n--- Gate: EXP-P0-CAP (Diagnostic Probe Modes) ---")
-        
-        # Mode 1: Uniforms & Capabilities HUD
-        self.cycle_shader_option_mode()
-        ok, _ = self.capture_screen(
-            "exp_p0_cap_mode1_uniforms_hud",
+
+        def cycle_and_capture(
+            gate_base: str,
+            scenario: str,
+            observation: str,
+            settle: float = 0.8,
+        ) -> None:
+            ok_cy, before, after, cyerr = self.cycle_shader_option_mode()
+            if not ok_cy:
+                self.record_gate(
+                    f"{gate_base}_mode_change",
+                    "FAIL",
+                    f"PROBE_MODE cycle not evidenced (before={before}, after={after})",
+                    error=cyerr,
+                )
+                return
+            self.record_gate(
+                f"{gate_base}_mode_change",
+                "PASS",
+                f"PROBE_MODE persisted {before} -> {after} in optionsshaders.txt",
+            )
+            time.sleep(settle)
+            ok_s, _, serr = self.capture_screen(scenario, observation)
+            if not ok_s:
+                self.record_gate(f"{gate_base}_capture", "FAIL", f"{scenario} capture failed", error=serr)
+            else:
+                self.record_gate(f"{gate_base}_capture", "PASS", f"Captured {scenario} at PROBE_MODE={after}")
+
+        cycle_and_capture(
+            "mode1_hud", "exp_p0_cap_mode1_uniforms_hud",
             "Mode 1 HUD verifying frameCounter heartbeat, frameTime bar, sunPosition, and worldTime",
         )
-        if not ok:
-            self.record_gate("capture_mode1_hud", "FAIL", "Failed to capture Mode 1 HUD screenshot")
-        else:
-            self.record_gate("capture_mode1_hud", "PASS", "Captured Mode 1 HUD screenshot")
 
-        # Mode 2: History & Skip-Clear Persistence
-        self.cycle_shader_option_mode()
+        # Mode 2 still: reuse the mode-2 state just reached, no extra cycle needed
+        # for the still itself, but the cycle gate above already proved entry.
         time.sleep(1.5)
-        ok, _ = self.capture_screen(
+        ok, _, err = self.capture_screen(
             "exp_p0_history_still_persistent_trail",
             "Mode 2 persistent trailing arc in colortex3 confirming colortex3Clear = false",
         )
         if not ok:
-            self.record_gate("capture_history_trail", "FAIL", "Failed to capture History still screenshot")
+            self.record_gate("capture_history_trail", "FAIL", "History still capture failed", error=err)
         else:
             self.record_gate("capture_history_trail", "PASS", "Captured History still screenshot")
 
-        # Mode 2 Motion
-        self.perform_camera_motion(1.5)
-        ok, _ = self.capture_screen(
-            "exp_p0_history_motion",
-            "Mode 2 camera motion with persistent screen-space trail",
+        ok_m, merr = self.perform_camera_motion(1.5)
+        if not ok_m:
+            self.record_gate("camera_motion_history", "FAIL", "History camera motion failed", error=merr)
+        else:
+            self.record_gate("camera_motion_history", "PASS", "History camera motion executed")
+        ok, _, err = self.capture_screen(
+            "exp_p0_history_motion", "Mode 2 camera motion with persistent screen-space trail",
         )
         if not ok:
-            self.record_gate("capture_history_motion", "FAIL", "Failed to capture History motion screenshot")
+            self.record_gate("capture_history_motion", "FAIL", "History motion capture failed", error=err)
         else:
             self.record_gate("capture_history_motion", "PASS", "Captured History motion screenshot")
 
-        # Mode 2 Teleport
-        self.send_chat_command("/tp ~50 ~ ~50")
-        time.sleep(0.8)
-        ok, _ = self.capture_screen(
+        ok_c, cerr = self.send_chat_command("/tp ~50 ~ ~50")
+        if not ok_c:
+            self.record_gate("teleport_command", "FAIL", "Teleport chat command failed", error=cerr)
+        else:
+            time.sleep(0.8)
+            self.record_gate("teleport_command", "PASS", "Teleport command delivered")
+        ok, _, err = self.capture_screen(
             "exp_p0_history_after_teleport",
             "Mode 2 teleport cut demonstrating retention of screen-space buffer",
         )
         if not ok:
-            self.record_gate("capture_history_teleport", "FAIL", "Failed to capture History teleport screenshot")
+            self.record_gate("capture_history_teleport", "FAIL", "History teleport capture failed", error=err)
         else:
             self.record_gate("capture_history_teleport", "PASS", "Captured History teleport screenshot")
 
-        # Mode 2 Resize
-        run_cmd(["wmctrl", "-r", "Minecraft 1.7.10", "-e", "0,200,100,1024,600"])
-        time.sleep(1.5)
-        ok, _ = self.capture_screen(
+        ok_r, rerr = self.resize_window("0,200,100,1024,600")
+        if not ok_r:
+            self.record_gate("resize_to_1024x600", "FAIL", "Resize to 1024x600 failed", error=rerr)
+        else:
+            time.sleep(1.5)
+            self.record_gate("resize_to_1024x600", "PASS", "Resize to 1024x600 executed")
+        ok, _, err = self.capture_screen(
             "exp_p0_history_after_resize",
             "Mode 2 window resize to 1024x600 confirming clean FBO reallocation",
         )
         if not ok:
-            self.record_gate("capture_history_resize", "FAIL", "Failed to capture History resize screenshot")
+            self.record_gate("capture_history_resize", "FAIL", "History resize capture failed", error=err)
         else:
             self.record_gate("capture_history_resize", "PASS", "Captured History resize screenshot")
-        # Restore window
-        run_cmd(["wmctrl", "-r", "Minecraft 1.7.10", "-e", "0,320,212,1280,720"])
-        time.sleep(1.0)
+        ok_r, rerr = self.resize_window("0,320,212,1280,720")
+        if not ok_r:
+            self.record_gate("resize_restore_1280x720", "FAIL", "Restore to 1280x720 failed", error=rerr)
+        else:
+            time.sleep(1.0)
+            self.record_gate("resize_restore_1280x720", "PASS", "Restore to 1280x720 executed")
 
-        # Mode 3: Material ID Mapping
-        self.cycle_shader_option_mode()
-        ok, _ = self.capture_screen(
-            "exp_p0_material_mapping_swatches",
+        cycle_and_capture(
+            "material_mapping", "exp_p0_material_mapping_swatches",
             "Mode 3 material ID visualization with false coloring from block.properties",
         )
-        if not ok:
-            self.record_gate("capture_material_mapping", "FAIL", "Failed to capture Material mapping screenshot")
-        else:
-            self.record_gate("capture_material_mapping", "PASS", "Captured Material mapping screenshot")
-
-        # Mode 4: Buffer Formats
-        self.cycle_shader_option_mode()
-        ok, _ = self.capture_screen(
-            "exp_p0_formats_fp16_r11f_split",
+        cycle_and_capture(
+            "formats_split", "exp_p0_formats_fp16_r11f_split",
             "Mode 4 split screen verifying RGBA16F (left) and R11F_G11F_B10F (right) buffers",
         )
-        if not ok:
-            self.record_gate("capture_formats_split", "FAIL", "Failed to capture Formats split screenshot")
-        else:
-            self.record_gate("capture_formats_split", "PASS", "Captured Formats split screenshot")
-
-        # Mode 5: Deferred Pass Validation
-        self.cycle_shader_option_mode()
-        ok, _ = self.capture_screen(
-            "exp_p0_deferred_pass_confirmed",
+        cycle_and_capture(
+            "deferred_pass", "exp_p0_deferred_pass_confirmed",
             "Mode 5 green banner confirming deferred pass execution and RENY_DEFERRED_MAGIC communication",
         )
-        if not ok:
-            self.record_gate("capture_deferred_pass", "FAIL", "Failed to capture Deferred pass screenshot")
+        # Cycle back toward Mode 0 for dimensions (verified as well).
+        ok_cy, before, after, cyerr = self.cycle_shader_option_mode()
+        if not ok_cy:
+            self.record_gate("return_mode_cycle", "FAIL",
+                              f"Return mode cycle not evidenced (before={before}, after={after})", error=cyerr)
         else:
-            self.record_gate("capture_deferred_pass", "PASS", "Captured Deferred pass screenshot")
+            self.record_gate("return_mode_cycle", "PASS", f"Return cycle persisted {before} -> {after}")
 
-        # Cycle back to Mode 0 for dimensions
-        self.cycle_shader_option_mode()
-
-        # ---------------------------------------------------------------------
-        # 3. EXP-P0-DIM: Dimension Transitions (Nether and End)
-        # ---------------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # 3. EXP-P0-DIM: fresh-log dimension transitions
+        # -----------------------------------------------------------------
         print("\n--- Gate: EXP-P0-DIM (Dimension Transitions) ---")
-        self.send_chat_command("/setblock ~ ~ ~ portal")
-        log_ok = self.wait_for_log(r"Loading dimension -1", timeout=30.0)
-        if not log_ok:
-            self.record_gate("dim_nether_transition", "FAIL", "Nether dimension -1 transition log not observed")
+        cursor = LogCursor.capture(self.log_path)
+        if cursor.error is not None:
+            self.record_gate("dim_nether_transition", "FAIL",
+                              "Nether wait aborted: log cursor failed", error=cursor.error)
         else:
-            self.record_gate("dim_nether_transition", "PASS", "Nether dimension -1 transition confirmed in log")
+            ok_c, cerr = self.send_chat_command("/setblock ~ ~ ~ portal")
+            if not ok_c:
+                self.record_gate("dim_nether_command", "FAIL", "Nether portal command failed", error=cerr)
+            else:
+                self.record_gate("dim_nether_command", "PASS", "Nether portal command delivered")
+                wait = wait_for_fresh_log(cursor, r"Loading dimension -1", timeout=30.0)
+                if not wait.matched:
+                    self.record_gate("dim_nether_transition", "FAIL",
+                                      f"Fresh Nether transition not observed: {wait.evidence}", error=wait.error)
+                else:
+                    extra = f" (rotation seen: {wait.truncated_or_rotated})" if wait.truncated_or_rotated else ""
+                    self.record_gate("dim_nether_transition", "PASS",
+                                      f"Fresh Nether transition confirmed: {wait.evidence}{extra}")
 
         time.sleep(3.0)
-        ok, _ = self.capture_screen(
-            "exp_p0_dim_nether_smoke",
-            "Nether DIM -1 rendering with world-1 shader override badge (red)",
+        ok, _, err = self.capture_screen(
+            "exp_p0_dim_nether_smoke", "Nether DIM -1 rendering with world-1 shader override badge (red)",
         )
         if not ok:
-            self.record_gate("capture_nether_smoke", "FAIL", "Failed to capture Nether smoke screenshot")
+            self.record_gate("capture_nether_smoke", "FAIL", "Nether smoke capture failed", error=err)
         else:
             self.record_gate("capture_nether_smoke", "PASS", "Captured Nether smoke screenshot")
 
-        # Return to Overworld
-        self.send_chat_command("/setblock ~ ~ ~ portal")
-        self.wait_for_log(r"Loading dimension 0", timeout=30.0)
-        time.sleep(3.0)
-        self.perform_camera_motion(1.5)
-
-        # The End
-        self.send_chat_command("/setblock ~ ~ ~ end_portal")
-        log_ok = self.wait_for_log(r"Loading dimension 1", timeout=30.0)
-        if not log_ok:
-            self.record_gate("dim_end_transition", "FAIL", "The End dimension 1 transition log not observed")
+        cursor = LogCursor.capture(self.log_path)
+        if cursor.error is not None:
+            self.record_gate("dim_return_transition", "FAIL",
+                              "Return wait aborted: log cursor failed", error=cursor.error)
         else:
-            self.record_gate("dim_end_transition", "PASS", "The End dimension 1 transition confirmed in log")
+            ok_c, cerr = self.send_chat_command("/setblock ~ ~ ~ portal")
+            if not ok_c:
+                self.record_gate("dim_return_command", "FAIL", "Return portal command failed", error=cerr)
+            else:
+                wait = wait_for_fresh_log(cursor, r"Loading dimension 0", timeout=30.0)
+                if not wait.matched:
+                    self.record_gate("dim_return_transition", "FAIL",
+                                      f"Fresh Overworld return not observed: {wait.evidence}", error=wait.error)
+                else:
+                    self.record_gate("dim_return_transition", "PASS",
+                                      f"Fresh Overworld return confirmed: {wait.evidence}")
+        time.sleep(3.0)
+        ok_m, merr = self.perform_camera_motion(1.5)
+        if not ok_m:
+            self.record_gate("camera_motion_return", "FAIL", "Return camera motion failed", error=merr)
+        else:
+            self.record_gate("camera_motion_return", "PASS", "Return camera motion executed")
+
+        cursor = LogCursor.capture(self.log_path)
+        if cursor.error is not None:
+            self.record_gate("dim_end_transition", "FAIL",
+                              "End wait aborted: log cursor failed", error=cursor.error)
+        else:
+            ok_c, cerr = self.send_chat_command("/setblock ~ ~ ~ end_portal")
+            if not ok_c:
+                self.record_gate("dim_end_command", "FAIL", "End portal command failed", error=cerr)
+            else:
+                self.record_gate("dim_end_command", "PASS", "End portal command delivered")
+                wait = wait_for_fresh_log(cursor, r"Loading dimension 1", timeout=30.0)
+                if not wait.matched:
+                    self.record_gate("dim_end_transition", "FAIL",
+                                      f"Fresh End transition not observed: {wait.evidence}", error=wait.error)
+                else:
+                    extra = f" (rotation seen: {wait.truncated_or_rotated})" if wait.truncated_or_rotated else ""
+                    self.record_gate("dim_end_transition", "PASS",
+                                      f"Fresh End transition confirmed: {wait.evidence}{extra}")
 
         time.sleep(3.0)
-        ok, _ = self.capture_screen(
-            "exp_p0_dim_end_smoke",
-            "The End DIM 1 rendering with world1 shader override badge (purple)",
+        ok, _, err = self.capture_screen(
+            "exp_p0_dim_end_smoke", "The End DIM 1 rendering with world1 shader override badge (purple)",
         )
         if not ok:
-            self.record_gate("capture_end_smoke", "FAIL", "Failed to capture End smoke screenshot")
+            self.record_gate("capture_end_smoke", "FAIL", "End smoke capture failed", error=err)
         else:
             self.record_gate("capture_end_smoke", "PASS", "Captured End smoke screenshot")
 
-        # ---------------------------------------------------------------------
-        # Final Summary and Manifest
-        # ---------------------------------------------------------------------
-        self.write_manifest(commit_sha)
+        # -----------------------------------------------------------------
+        # Final summary and manifest
+        # -----------------------------------------------------------------
+        ok_w, werr = self.write_manifest(tested_tree_sha)
+        if not ok_w:
+            self.record_gate("manifest_write", "FAIL", "Manifest write failed", error=werr)
+        else:
+            self.record_gate("manifest_write", "PASS", f"Manifest written to {self.manifest_path}")
 
         failed_gates = [g.name for g in self.gates if g.status == "FAIL"]
         if self.overall_success and len(failed_gates) == 0:
             print("\n=== ALL P0 SUITE GATES PASSED (FAIL-CLOSED) ===\n")
             return 0
-        else:
-            print(f"\n=== P0 SUITE FINISHED WITH FAILURES: {failed_gates} ===\n")
-            return 1
+        print(f"\n=== P0 SUITE FINISHED WITH FAILURES: {failed_gates} ===\n")
+        return 1
+
+
+def _git_rev_parse_head() -> str:
+    res = run_checked(["git", "rev-parse", "HEAD"])
+    return res.stdout.strip() if res.ok and res.stdout.strip() else "unknown"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="P0 Validation Suite Runner")
-    parser.add_argument("--commit-sha", type=str, default="", help="Commit SHA to record in manifest")
-    parser.add_argument(
-        "--update-repo-manifest",
-        action="store_true",
-        help="Update benchmarks/artifacts/p0_probe/MANIFEST.md in repository",
-    )
+    parser = argparse.ArgumentParser(description="P0 Validation Suite Runner (fail-closed)")
+    parser.add_argument("--commit-sha", type=str, default="",
+                        help="Tested tree SHA to record (defaults to current HEAD)")
+    parser.add_argument("--update-repo-manifest", action="store_true",
+                        help="Update benchmarks/artifacts/p0_probe/MANIFEST.md in repository")
     args = parser.parse_args()
 
-    commit_sha = args.commit_sha
-    if not commit_sha:
-        res = run_cmd(["git", "rev-parse", "HEAD"])
-        commit_sha = res.stdout.strip() if res.returncode == 0 else "unknown"
-
+    tested_sha = args.commit_sha.strip() or _git_rev_parse_head()
     suite = P0Suite(update_repo_manifest=args.update_repo_manifest)
-    return suite.run_all(commit_sha)
+    return suite.run_all(tested_sha)
 
 
 if __name__ == "__main__":

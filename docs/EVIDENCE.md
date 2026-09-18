@@ -56,7 +56,10 @@ Implicação: dizer apenas “Minecraft 1.7.10 shaders” é tecnicamente insufi
 
 ### Validação empírica no stack-alvo (Forge 1614 + OptiFine E7 + Mesa Intel Iris Xe)
 
-Executado no cliente Minecraft 1.7.10 real através do probe P0 versionado:
+Executado no cliente Minecraft 1.7.10 real através do probe P0 versionado.
+Proveniência exata (tested tree SHA, gates e delta allowlisted) em
+`benchmarks/reports/p0_probe_report.json` / `.md` e
+`benchmarks/artifacts/p0_probe/MANIFEST.md`.
 
 - **Pipeline base:** 19 programas GLSL 1.20 compilaram e executaram sem erros OpenGL ou GLSL (`gbuffers_*`, `deferred`, `composite`, `final`, `shadow`).
 - **Deferred stage:** confirmado funcional entre terrain e water. `deferred.fsh` comunica com `composite` via `colortex4` com flip automático de ping-pong (`flipped buffers after deferred: 0, 4`) e restauração por `deferred_last`.
