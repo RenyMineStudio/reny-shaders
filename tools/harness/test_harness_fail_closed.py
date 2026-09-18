@@ -183,6 +183,24 @@ def test_mandatory_fail_exit() -> None:
           f"simulated evaluator exit={simulated_exit}")
 
 
+def test_verified_command_no_window() -> None:
+    """A state-changing command with no game window must FAIL verification."""
+    import tempfile
+    from run_p0_suite import P0Suite, SCREENSHOT_DIR
+    with tempfile.TemporaryDirectory() as td:
+        suite = P0Suite.__new__(P0Suite)
+        suite.instance_dir = Path(td)
+        suite.log_paths = [Path(td) / "logs" / "client_stdout.log", Path(td) / "logs" / "latest.log"]
+        suite.options_path = Path(td) / "optionsshaders.txt"
+        suite.screenshot_dir = Path(td)
+        suite.captures = []
+        # No MC window exists in this environment: xdotool search fails.
+        ok, evidence, err = suite.send_chat_command_verified("/time set 0", r"Set the time to", timeout=2.0)
+        check("verified_command_no_window",
+              ok is False and not evidence and err is not None,
+              f"ok={ok}, err={(err or '')[:120]}")
+
+
 def main() -> int:
     print("=== P0 HARNESS FAIL-CLOSED VERIFICATION ===\n")
     test_x11_command_failure()
@@ -190,6 +208,7 @@ def main() -> int:
     test_log_read_failure()
     test_stale_log_match()
     test_scale_tristate()
+    test_verified_command_no_window()
     test_mandatory_fail_exit()
     print(f"\n{PASS_COUNT} negative controls passed, {len(FAILURES)} failed: {FAILURES}")
     return 0 if not FAILURES else 1

@@ -83,6 +83,25 @@ def run_checked(args: List[str], timeout: float = 30.0) -> CheckedResult:
         return CheckedResult(ok=False, returncode=None, error=f"os-error: {exc}")
 
 
+# Verified menu geometry (content fractions on the 1280x720 MC window,
+# measured against real screenshots of each OptiFine E7 screen; the
+# content origin comes from `xdotool getwindowgeometry`, which already
+# accounts for WM decorations).
+MENU_PAUSE_OPTIONS = (0.392, 0.642)
+MENU_OPTIONS_VIDEO = (0.313, 0.568)
+MENU_VIDEO_SHADERS = (0.313, 0.668)
+MENU_SHADERS_DONE = (0.500, 0.929)
+MENU_SHADERS_OPTIONS = (0.820, 0.930)
+MENU_SHADEROPTS_PROBE = (0.290, 0.250)
+MENU_SHADEROPTS_DONE = (0.710, 0.920)
+MENU_VIDEO_DONE = (0.500, 0.940)
+MENU_OPTIONS_DONE = (0.500, 0.890)
+
+CONFIRM_TIME_SET = r"Set the time to"
+CONFIRM_TELEPORTED = r"Teleported RenyTester"
+CONFIRM_BLOCK_PLACED = r"Block placed"
+
+
 def compute_sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -296,6 +315,7 @@ def wait_for_fresh_combined(
 # program loads) that a portal transition triggers.
 DIM_SWITCH_FRESH_PATTERN = (
     r"Reset world renderers"
+    r"|\[Shaders\] Uninit"
     r"|Program loaded: world-1/"
     r"|Program loaded: world1/"
     r"|Loading dimension -1"
@@ -467,6 +487,33 @@ class P0Suite:
         time.sleep(0.5)
         return True, None
 
+    def send_chat_command_verified(
+        self,
+        command: str,
+        confirm_pattern: str,
+        timeout: float = 15.0,
+    ) -> Tuple[bool, str, Optional[str]]:
+        """Send a chat command and prove the SERVER acted on it.
+
+        xdotool success alone never counts as execution: after sending the
+        keys, a fresh-log wait must observe the server's confirmation line.
+        One retry is allowed; persistent absence is an explicit failure.
+        """
+        for attempt in (1, 2):
+            cursors = capture_all(self.log_paths)
+            ok, send_err = self.send_chat_command(command)
+            if not ok:
+                last_err = f"attempt {attempt}: key delivery failed: {send_err}"
+                time.sleep(1.0)
+                continue
+            wait = wait_for_fresh_combined(cursors, confirm_pattern, timeout=timeout)
+            if wait.matched:
+                return True, f"server confirmed (attempt {attempt}): {wait.evidence}", None
+            last_err = (f"attempt {attempt}: no server confirmation: {wait.evidence} "
+                        f"(error: {wait.error})")
+            time.sleep(1.0)
+        return False, "", f"command {command!r} unverified after 2 attempts: {last_err}"
+
     def resize_window(self, geometry: str) -> Tuple[bool, Optional[str]]:
         res = run_checked(["wmctrl", "-r", "Minecraft 1.7.10", "-e", geometry])
         if not res.ok:
@@ -538,23 +585,23 @@ class P0Suite:
                 time.sleep(sleep_after)
 
         step(["xdotool", "key", "Escape"], 0.5)
-        for rx, ry, d in (
-            (0.38, 0.62, 0.5),  # Options...
-            (0.38, 0.58, 0.5),  # Video Settings...
-            (0.38, 0.68, 0.8),  # Shaders...
-        ):
+        nav = [
+            (MENU_PAUSE_OPTIONS, 0.8, "Options..."),
+            (MENU_OPTIONS_VIDEO, 0.8, "Video Settings..."),
+            (MENU_VIDEO_SHADERS, 1.0, "Shaders..."),
+        ]
+        for (rx, ry), d, label in nav:
             ok_c, cerr = self.click_relative(rx, ry, delay=d)
             if not ok_c:
-                failures.append(f"click ({rx},{ry}) -> {cerr}")
-        ok_c, cerr = self.click_relative(0.50, 0.93, delay=2.5)  # Done in Shaders
-        if not ok_c:
-            failures.append(f"click Done/Shaders -> {cerr}")
-        ok_c, cerr = self.click_relative(0.50, 0.93, delay=0.5)
-        if not ok_c:
-            failures.append(f"click Done/Video -> {cerr}")
-        ok_c, cerr = self.click_relative(0.50, 0.93, delay=0.5)
-        if not ok_c:
-            failures.append(f"click Done/Options -> {cerr}")
+                failures.append(f"click {label} ({rx},{ry}) -> {cerr}")
+        for (rx, ry), d, label in [
+            (MENU_SHADERS_DONE, 2.5, "Done/Shaders"),
+            (MENU_VIDEO_DONE, 0.8, "Done/Video"),
+            (MENU_OPTIONS_DONE, 0.8, "Done/Options"),
+        ]:
+            ok_c, cerr = self.click_relative(rx, ry, delay=d)
+            if not ok_c:
+                failures.append(f"click {label} ({rx},{ry}) -> {cerr}")
         step(["xdotool", "key", "Escape"], 1.0)
 
         if failures:
@@ -585,20 +632,21 @@ class P0Suite:
         if not res.ok:
             failures.append(f"Escape -> {res.error}")
         time.sleep(0.5)
-        for rx, ry, d in (
-            (0.38, 0.62, 0.5),
-            (0.38, 0.58, 0.5),
-            (0.38, 0.68, 0.8),
-            (0.83, 0.93, 1.0),  # Shader Options...
-            (0.20, 0.25, 0.8),  # Probe Mode button
-            (0.68, 0.95, 2.5),  # Done in Shader Options
-            (0.50, 0.93, 0.5),
-            (0.50, 0.93, 0.5),
-            (0.50, 0.93, 0.5),
-        ):
+        nav = [
+            (MENU_PAUSE_OPTIONS, 0.8, "Options..."),
+            (MENU_OPTIONS_VIDEO, 0.8, "Video Settings..."),
+            (MENU_VIDEO_SHADERS, 1.0, "Shaders..."),
+            (MENU_SHADERS_OPTIONS, 1.2, "Shader Options..."),
+            (MENU_SHADEROPTS_PROBE, 1.0, "Probe Mode button"),
+            (MENU_SHADEROPTS_DONE, 2.5, "Done/ShaderOpts"),
+            (MENU_SHADERS_DONE, 0.8, "Done/Shaders"),
+            (MENU_VIDEO_DONE, 0.8, "Done/Video"),
+            (MENU_OPTIONS_DONE, 0.8, "Done/Options"),
+        ]
+        for (rx, ry), d, label in nav:
             ok_c, cerr = self.click_relative(rx, ry, delay=d)
             if not ok_c:
-                failures.append(f"click ({rx},{ry}) -> {cerr}")
+                failures.append(f"click {label} ({rx},{ry}) -> {cerr}")
         res = run_checked(["xdotool", "key", "Escape"])
         if not res.ok:
             failures.append(f"final Escape -> {res.error}")
@@ -766,12 +814,12 @@ class P0Suite:
         else:
             self.record_gate("capture_overworld_motion", "PASS", "Captured Overworld motion screenshot")
 
-        ok_c, cerr = self.send_chat_command("/time set 18000")
+        ok_c, evidence, cerr = self.send_chat_command_verified("/time set 18000", CONFIRM_TIME_SET)
         if not ok_c:
-            self.record_gate("time_set_night", "FAIL", "Chat command '/time set 18000' failed", error=cerr)
+            self.record_gate("time_set_night", "FAIL", "Server did not confirm '/time set 18000'", error=cerr)
         else:
             time.sleep(1.0)
-            self.record_gate("time_set_night", "PASS", "Night time command delivered")
+            self.record_gate("time_set_night", "PASS", f"Night time server-confirmed: {evidence}")
         ok, _, err = self.capture_screen(
             "exp_p0_stack_overworld_night",
             "Overworld night scene verifying dark sky, stars, and emissive contrast",
@@ -852,12 +900,12 @@ class P0Suite:
         else:
             self.record_gate("capture_history_motion", "PASS", "Captured History motion screenshot")
 
-        ok_c, cerr = self.send_chat_command("/tp ~50 ~ ~50")
+        ok_c, evidence, cerr = self.send_chat_command_verified("/tp ~50 ~ ~50", CONFIRM_TELEPORTED)
         if not ok_c:
-            self.record_gate("teleport_command", "FAIL", "Teleport chat command failed", error=cerr)
+            self.record_gate("teleport_command", "FAIL", "Server did not confirm teleport", error=cerr)
         else:
             time.sleep(0.8)
-            self.record_gate("teleport_command", "PASS", "Teleport command delivered")
+            self.record_gate("teleport_command", "PASS", f"Teleport server-confirmed: {evidence}")
         ok, _, err = self.capture_screen(
             "exp_p0_history_after_teleport",
             "Mode 2 teleport cut demonstrating retention of screen-space buffer",
@@ -919,11 +967,12 @@ class P0Suite:
                               "Nether wait aborted: log cursor failed",
                               error="; ".join(f"{c.path.name}: {c.error}" for c in bad))
         else:
-            ok_c, cerr = self.send_chat_command("/setblock ~ ~ ~ portal")
+            ok_c, evidence, cerr = self.send_chat_command_verified(
+                "/setblock ~ ~ ~ portal", CONFIRM_BLOCK_PLACED)
             if not ok_c:
-                self.record_gate("dim_nether_command", "FAIL", "Nether portal command failed", error=cerr)
+                self.record_gate("dim_nether_command", "FAIL", "Server did not confirm Nether portal setblock", error=cerr)
             else:
-                self.record_gate("dim_nether_command", "PASS", "Nether portal command delivered")
+                self.record_gate("dim_nether_command", "PASS", f"Nether portal server-confirmed: {evidence}")
                 wait = wait_for_fresh_combined(cursors, DIM_SWITCH_FRESH_PATTERN, timeout=45.0)
                 if not wait.matched:
                     self.record_gate("dim_nether_transition", "FAIL",
@@ -949,9 +998,10 @@ class P0Suite:
                               "Return wait aborted: log cursor failed",
                               error="; ".join(f"{c.path.name}: {c.error}" for c in bad))
         else:
-            ok_c, cerr = self.send_chat_command("/setblock ~ ~ ~ portal")
+            ok_c, evidence, cerr = self.send_chat_command_verified(
+                "/setblock ~ ~ ~ portal", CONFIRM_BLOCK_PLACED)
             if not ok_c:
-                self.record_gate("dim_return_command", "FAIL", "Return portal command failed", error=cerr)
+                self.record_gate("dim_return_command", "FAIL", "Server did not confirm return portal setblock", error=cerr)
             else:
                 wait = wait_for_fresh_combined(cursors, DIM_SWITCH_FRESH_PATTERN, timeout=45.0)
                 if not wait.matched:
@@ -974,11 +1024,12 @@ class P0Suite:
                               "End wait aborted: log cursor failed",
                               error="; ".join(f"{c.path.name}: {c.error}" for c in bad))
         else:
-            ok_c, cerr = self.send_chat_command("/setblock ~ ~ ~ end_portal")
+            ok_c, evidence, cerr = self.send_chat_command_verified(
+                "/setblock ~ ~ ~ end_portal", CONFIRM_BLOCK_PLACED)
             if not ok_c:
-                self.record_gate("dim_end_command", "FAIL", "End portal command failed", error=cerr)
+                self.record_gate("dim_end_command", "FAIL", "Server did not confirm end portal setblock", error=cerr)
             else:
-                self.record_gate("dim_end_command", "PASS", "End portal command delivered")
+                self.record_gate("dim_end_command", "PASS", f"End portal server-confirmed: {evidence}")
                 wait = wait_for_fresh_combined(cursors, DIM_SWITCH_FRESH_PATTERN, timeout=45.0)
                 if not wait.matched:
                     self.record_gate("dim_end_transition", "FAIL",
