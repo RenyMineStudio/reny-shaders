@@ -509,6 +509,25 @@ class P0Suite:
             return False, before, after, f"PROBE_MODE out of range after cycle: {after}"
         return True, before, after, None
 
+    def cycle_to_mode(self, target: int) -> Tuple[bool, Optional[int], Optional[int], Optional[str]]:
+        """Advance PROBE_MODE via repeated GUI cycles until it equals target (max 6 steps)."""
+        if not (0 <= target <= 5):
+            return False, None, None, f"target out of range: {target}"
+        start_val, rerr = read_probe_mode_option(self.options_path)
+        if rerr is not None:
+            return False, start_val, None, f"initial PROBE_MODE unreadable: {rerr}"
+        if start_val == target:
+            return True, start_val, target, None
+        current = start_val
+        for _ in range(6):
+            ok, _, after, err = self.cycle_shader_option_mode()
+            if not ok:
+                return False, start_val, after, err
+            current = after  # type: ignore[assignment]
+            if current == target:
+                return True, start_val, current, None
+        return False, start_val, current, f"did not reach mode {target} within 6 cycles (ended at {current})"
+
     def perform_camera_motion(self, duration: float = 2.0) -> Tuple[bool, Optional[str]]:
         ok, ferr = self.focus_window()
         if not ok:
@@ -653,25 +672,26 @@ class P0Suite:
         # -----------------------------------------------------------------
         print("\n--- Gate: EXP-P0-CAP (Diagnostic Probe Modes) ---")
 
-        def cycle_and_capture(
+        def goto_and_capture(
             gate_base: str,
+            target_mode: int,
             scenario: str,
             observation: str,
             settle: float = 0.8,
         ) -> None:
-            ok_cy, before, after, cyerr = self.cycle_shader_option_mode()
-            if not ok_cy:
+            ok_cy, before, after, cyerr = self.cycle_to_mode(target_mode)
+            if not ok_cy or after != target_mode:
                 self.record_gate(
                     f"{gate_base}_mode_change",
                     "FAIL",
-                    f"PROBE_MODE cycle not evidenced (before={before}, after={after})",
+                    f"PROBE_MODE did not reach {target_mode} (before={before}, after={after})",
                     error=cyerr,
                 )
                 return
             self.record_gate(
                 f"{gate_base}_mode_change",
                 "PASS",
-                f"PROBE_MODE persisted {before} -> {after} in optionsshaders.txt",
+                f"PROBE_MODE reached {target_mode} (from {before}), persisted in optionsshaders.txt",
             )
             time.sleep(settle)
             ok_s, _, serr = self.capture_screen(scenario, observation)
@@ -680,10 +700,18 @@ class P0Suite:
             else:
                 self.record_gate(f"{gate_base}_capture", "PASS", f"Captured {scenario} at PROBE_MODE={after}")
 
-        cycle_and_capture(
-            "mode1_hud", "exp_p0_cap_mode1_uniforms_hud",
+        goto_and_capture(
+            "mode1_hud", 1, "exp_p0_cap_mode1_uniforms_hud",
             "Mode 1 HUD verifying frameCounter heartbeat, frameTime bar, sunPosition, and worldTime",
         )
+
+        ok_cy, before, after, cyerr = self.cycle_to_mode(2)
+        if not ok_cy or after != 2:
+            self.record_gate("history_mode_change", "FAIL",
+                              f"PROBE_MODE did not reach 2 (before={before}, after={after})", error=cyerr)
+        else:
+            self.record_gate("history_mode_change", "PASS",
+                              f"PROBE_MODE reached 2 (from {before}), persisted in optionsshaders.txt")
 
         # Mode 2 still: reuse the mode-2 state just reached, no extra cycle needed
         # for the still itself, but the cycle gate above already proved entry.
@@ -746,25 +774,25 @@ class P0Suite:
             time.sleep(1.0)
             self.record_gate("resize_restore_1280x720", "PASS", "Restore to 1280x720 executed")
 
-        cycle_and_capture(
-            "material_mapping", "exp_p0_material_mapping_swatches",
+        goto_and_capture(
+            "material_mapping", 3, "exp_p0_material_mapping_swatches",
             "Mode 3 material ID visualization with false coloring from block.properties",
         )
-        cycle_and_capture(
-            "formats_split", "exp_p0_formats_fp16_r11f_split",
+        goto_and_capture(
+            "formats_split", 4, "exp_p0_formats_fp16_r11f_split",
             "Mode 4 split screen verifying RGBA16F (left) and R11F_G11F_B10F (right) buffers",
         )
-        cycle_and_capture(
-            "deferred_pass", "exp_p0_deferred_pass_confirmed",
+        goto_and_capture(
+            "deferred_pass", 5, "exp_p0_deferred_pass_confirmed",
             "Mode 5 green banner confirming deferred pass execution and RENY_DEFERRED_MAGIC communication",
         )
-        # Cycle back toward Mode 0 for dimensions (verified as well).
-        ok_cy, before, after, cyerr = self.cycle_shader_option_mode()
-        if not ok_cy:
+        # Return to Mode 0 for dimensions (verified as well).
+        ok_cy, before, after, cyerr = self.cycle_to_mode(0)
+        if not ok_cy or after != 0:
             self.record_gate("return_mode_cycle", "FAIL",
-                              f"Return mode cycle not evidenced (before={before}, after={after})", error=cyerr)
+                              f"Return to mode 0 not evidenced (before={before}, after={after})", error=cyerr)
         else:
-            self.record_gate("return_mode_cycle", "PASS", f"Return cycle persisted {before} -> {after}")
+            self.record_gate("return_mode_cycle", "PASS", f"Returned to PROBE_MODE 0 (from {before})")
 
         # -----------------------------------------------------------------
         # 3. EXP-P0-DIM: fresh-log dimension transitions
