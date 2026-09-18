@@ -211,6 +211,99 @@ def wait_for_fresh_log(
     )
 
 
+def capture_all(paths: List[Path]) -> List[LogCursor]:
+    return [LogCursor.capture(p) for p in paths]
+
+
+def read_fresh_combined(cursors: List[LogCursor]) -> FreshLogRead:
+    """Concatenate fresh bytes from every evidence log (rotation-aware per file)."""
+    parts: List[str] = []
+    rotated = False
+    errors: List[str] = []
+    for c in cursors:
+        if c.error is not None:
+            errors.append(f"{c.path.name}: cursor failed: {c.error}")
+            continue
+        fresh = read_fresh_log(c)
+        if fresh.error is not None:
+            errors.append(f"{c.path.name}: {fresh.error}")
+            continue
+        if fresh.truncated_or_rotated:
+            rotated = True
+        if fresh.lines:
+            parts.append(fresh.lines)
+    combined = "\n".join(parts)
+    err = "; ".join(errors) if errors and not combined else None
+    return FreshLogRead(lines=combined, truncated_or_rotated=rotated, error=err)
+
+
+def wait_for_fresh_combined(
+    cursors: List[LogCursor],
+    pattern: str,
+    timeout: float = 30.0,
+    poll_interval: float = 0.5,
+) -> LogWaitResult:
+    """
+    Wait for `pattern` in bytes appended AFTER all cursors, across every
+    evidence log. Stale occurrences from earlier in the session never satisfy
+    the wait, no matter which file carried them.
+    """
+    bad = [c for c in cursors if c.error is not None]
+    if bad:
+        return LogWaitResult(
+            matched=False, evidence="",
+            error="cursor capture failed, cannot trust wait: "
+                  + "; ".join(f"{c.path.name}: {c.error}" for c in bad),
+        )
+    try:
+        regex = re.compile(pattern)
+    except re.error as exc:
+        return LogWaitResult(matched=False, evidence="", error=f"invalid regex {pattern!r}: {exc}")
+
+    deadline = time.time() + timeout
+    last_error: Optional[str] = None
+    saw_rotation = False
+    while time.time() < deadline:
+        fresh = read_fresh_combined(cursors)
+        if fresh.error is not None:
+            last_error = fresh.error
+            time.sleep(poll_interval)
+            continue
+        if fresh.truncated_or_rotated:
+            saw_rotation = True
+        m = regex.search(fresh.lines)
+        if m:
+            context = m.group(0)[:220]
+            return LogWaitResult(
+                matched=True,
+                evidence=f"fresh match after cursor: {context!r}",
+                truncated_or_rotated=saw_rotation,
+            )
+        time.sleep(poll_interval)
+    return LogWaitResult(
+        matched=False,
+        evidence=f"no fresh match for {pattern!r} within {timeout}s (rotation seen: {saw_rotation})",
+        error=last_error or f"timeout waiting for fresh log pattern {pattern!r}",
+        truncated_or_rotated=saw_rotation,
+    )
+
+
+# Fresh re-init signature of a real dimension switch on this stack.
+# NOTE: "Loading dimension <id>" lines are emitted only at integrated-server
+# startup, so they can NEVER satisfy a fresh post-action wait on their own;
+# they are kept in the alternation only as a harmless extra. The operative
+# evidence is the shader re-init block (Reset world renderers / per-dimension
+# program loads) that a portal transition triggers.
+DIM_SWITCH_FRESH_PATTERN = (
+    r"Reset world renderers"
+    r"|Program loaded: world-1/"
+    r"|Program loaded: world1/"
+    r"|Loading dimension -1"
+    r"|Loading dimension 1"
+    r"|Loading dimension 0"
+)
+
+
 def read_probe_mode_option(options_path: Path = OPTIONS_SHADERS_PATH) -> Tuple[Optional[int], Optional[str]]:
     """Read persisted PROBE_MODE from optionsshaders.txt (runtime file, not tracked)."""
     try:
@@ -252,7 +345,13 @@ class P0Suite:
         update_repo_manifest: bool = False,
     ) -> None:
         self.instance_dir = instance_dir
-        self.log_path = instance_dir / "logs" / "latest.log"
+        # Evidence logs: JVM stdout carries the [Shaders] loader lines while
+        # latest.log carries server lines; parse both so evidence routing
+        # never depends on which launch flags were used.
+        self.log_paths = [
+            instance_dir / "logs" / "client_stdout.log",
+            instance_dir / "logs" / "latest.log",
+        ]
         self.options_path = instance_dir / "optionsshaders.txt"
         self.screenshot_dir = SCREENSHOT_DIR
         self.screenshot_dir.mkdir(parents=True, exist_ok=True)
@@ -286,17 +385,21 @@ class P0Suite:
         return windows[-1], None
 
     def get_window_geometry(self, win: str) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[str]]:
-        res = run_checked(["xwininfo", "-id", win])
+        # Content origin + size via xdotool (accounts for WM decorations;
+        # xwininfo absolute coords alone miss by the decoration offset).
+        res = run_checked(["xdotool", "getwindowgeometry", win])
         if not res.ok:
-            return None, f"xwininfo failed: {res.error}"
+            return None, f"getwindowgeometry failed: {res.error}"
         try:
-            x = int(re.search(r"Absolute upper-left X:\s+(\d+)", res.stdout).group(1))  # type: ignore[union-attr]
-            y = int(re.search(r"Absolute upper-left Y:\s+(\d+)", res.stdout).group(1))  # type: ignore[union-attr]
-            w = int(re.search(r"Width:\s+(\d+)", res.stdout).group(1))  # type: ignore[union-attr]
-            h = int(re.search(r"Height:\s+(\d+)", res.stdout).group(1))  # type: ignore[union-attr]
+            pos = re.search(r"Position:\s+(-?\d+),(-?\d+)", res.stdout)
+            geo = re.search(r"Geometry:\s+(\d+)x(\d+)", res.stdout)
+            if not pos or not geo:
+                raise ValueError(f"unparseable geometry output: {res.stdout[:200]!r}")
+            x, y = int(pos.group(1)), int(pos.group(2))
+            w, h = int(geo.group(1)), int(geo.group(2))
             return (x, y, w, h), None
         except (AttributeError, ValueError) as exc:
-            return None, f"xwininfo parse failed: {exc}"
+            return None, f"window geometry parse failed: {exc}"
 
     def focus_window(self) -> Tuple[bool, Optional[str]]:
         w, err = self.get_window()
@@ -304,11 +407,16 @@ class P0Suite:
             return False, err or "no window to focus"
         r1 = run_checked(["xdotool", "windowactivate", w])
         r2 = run_checked(["xdotool", "windowraise", w])
-        time.sleep(0.3)
+        time.sleep(1.0)  # let the WM grant focus before any pointer action
         if not r1.ok:
             return False, f"windowactivate failed: {r1.error}"
         if not r2.ok:
             return False, f"windowraise failed: {r2.error}"
+        r3 = run_checked(["xdotool", "getwindowfocus"])
+        if r3.ok and r3.stdout.strip() != w:
+            return False, f"focus not granted (focused={r3.stdout.strip()!r}, want={w!r})"
+        if not r3.ok:
+            return False, f"getwindowfocus check failed: {r3.error}"
         return True, None
 
     def click_relative(self, rx: float, ry: float, delay: float = 0.5) -> Tuple[bool, Optional[str]]:
@@ -321,15 +429,19 @@ class P0Suite:
         x, y, width, height = geom
         cx = x + int(width * rx)
         cy = y + int(height * ry)
-        for step, cmd in (
-            ("mousemove", ["xdotool", "mousemove", str(cx), str(cy)]),
-            ("mousedown", ["xdotool", "mousedown", "1"]),
-            ("mouseup", ["xdotool", "mouseup", "1"]),
-        ):
-            res = run_checked(cmd)
-            if not res.ok:
-                return False, f"click {step} failed at ({cx},{cy}): {res.error}"
-            time.sleep(0.08 if step != "mouseup" else 0.0)
+        # Proven delivery on this stack needs a real press hold (~0.3s);
+        # 0.1s taps are silently swallowed by the LWJGL window.
+        res = run_checked(["xdotool", "mousemove", str(cx), str(cy)])
+        if not res.ok:
+            return False, f"click mousemove failed at ({cx},{cy}): {res.error}"
+        time.sleep(0.2)
+        res = run_checked(["xdotool", "mousedown", "1"])
+        if not res.ok:
+            return False, f"click mousedown failed at ({cx},{cy}): {res.error}"
+        time.sleep(0.3)
+        res = run_checked(["xdotool", "mouseup", "1"])
+        if not res.ok:
+            return False, f"click mouseup failed at ({cx},{cy}): {res.error}"
         time.sleep(delay)
         return True, None
 
@@ -406,9 +518,11 @@ class P0Suite:
         if not w:
             return False, "", err or "reload aborted: no window"
 
-        cursor = LogCursor.capture(self.log_path)
-        if cursor.error is not None:
-            return False, "", f"reload aborted, log cursor failed: {cursor.error}"
+        cursors = capture_all(self.log_paths)
+        bad = [c for c in cursors if c.error is not None]
+        if bad:
+            return False, "", "reload aborted, log cursor failed: " + "; ".join(
+                f"{c.path.name}: {c.error}" for c in bad)
 
         ok, ferr = self.focus_window()
         if not ok:
@@ -446,7 +560,7 @@ class P0Suite:
         if failures:
             return False, "", f"reload GUI steps failed: {'; '.join(failures)}"
 
-        wait = wait_for_fresh_log(cursor, r"Framebuffer created\.|Program loaded: final", timeout=30.0)
+        wait = wait_for_fresh_combined(cursors, r"Framebuffer created\.|Program loaded: final", timeout=30.0)
         if not wait.matched:
             return False, "", f"reload not evidenced in fresh log: {wait.evidence} (error: {wait.error})"
         return True, wait.evidence, None
@@ -798,17 +912,19 @@ class P0Suite:
         # 3. EXP-P0-DIM: fresh-log dimension transitions
         # -----------------------------------------------------------------
         print("\n--- Gate: EXP-P0-DIM (Dimension Transitions) ---")
-        cursor = LogCursor.capture(self.log_path)
-        if cursor.error is not None:
+        cursors = capture_all(self.log_paths)
+        bad = [c for c in cursors if c.error is not None]
+        if bad:
             self.record_gate("dim_nether_transition", "FAIL",
-                              "Nether wait aborted: log cursor failed", error=cursor.error)
+                              "Nether wait aborted: log cursor failed",
+                              error="; ".join(f"{c.path.name}: {c.error}" for c in bad))
         else:
             ok_c, cerr = self.send_chat_command("/setblock ~ ~ ~ portal")
             if not ok_c:
                 self.record_gate("dim_nether_command", "FAIL", "Nether portal command failed", error=cerr)
             else:
                 self.record_gate("dim_nether_command", "PASS", "Nether portal command delivered")
-                wait = wait_for_fresh_log(cursor, r"Loading dimension -1", timeout=30.0)
+                wait = wait_for_fresh_combined(cursors, DIM_SWITCH_FRESH_PATTERN, timeout=45.0)
                 if not wait.matched:
                     self.record_gate("dim_nether_transition", "FAIL",
                                       f"Fresh Nether transition not observed: {wait.evidence}", error=wait.error)
@@ -826,16 +942,18 @@ class P0Suite:
         else:
             self.record_gate("capture_nether_smoke", "PASS", "Captured Nether smoke screenshot")
 
-        cursor = LogCursor.capture(self.log_path)
-        if cursor.error is not None:
+        cursors = capture_all(self.log_paths)
+        bad = [c for c in cursors if c.error is not None]
+        if bad:
             self.record_gate("dim_return_transition", "FAIL",
-                              "Return wait aborted: log cursor failed", error=cursor.error)
+                              "Return wait aborted: log cursor failed",
+                              error="; ".join(f"{c.path.name}: {c.error}" for c in bad))
         else:
             ok_c, cerr = self.send_chat_command("/setblock ~ ~ ~ portal")
             if not ok_c:
                 self.record_gate("dim_return_command", "FAIL", "Return portal command failed", error=cerr)
             else:
-                wait = wait_for_fresh_log(cursor, r"Loading dimension 0", timeout=30.0)
+                wait = wait_for_fresh_combined(cursors, DIM_SWITCH_FRESH_PATTERN, timeout=45.0)
                 if not wait.matched:
                     self.record_gate("dim_return_transition", "FAIL",
                                       f"Fresh Overworld return not observed: {wait.evidence}", error=wait.error)
@@ -849,17 +967,19 @@ class P0Suite:
         else:
             self.record_gate("camera_motion_return", "PASS", "Return camera motion executed")
 
-        cursor = LogCursor.capture(self.log_path)
-        if cursor.error is not None:
+        cursors = capture_all(self.log_paths)
+        bad = [c for c in cursors if c.error is not None]
+        if bad:
             self.record_gate("dim_end_transition", "FAIL",
-                              "End wait aborted: log cursor failed", error=cursor.error)
+                              "End wait aborted: log cursor failed",
+                              error="; ".join(f"{c.path.name}: {c.error}" for c in bad))
         else:
             ok_c, cerr = self.send_chat_command("/setblock ~ ~ ~ end_portal")
             if not ok_c:
                 self.record_gate("dim_end_command", "FAIL", "End portal command failed", error=cerr)
             else:
                 self.record_gate("dim_end_command", "PASS", "End portal command delivered")
-                wait = wait_for_fresh_log(cursor, r"Loading dimension 1", timeout=30.0)
+                wait = wait_for_fresh_combined(cursors, DIM_SWITCH_FRESH_PATTERN, timeout=45.0)
                 if not wait.matched:
                     self.record_gate("dim_end_transition", "FAIL",
                                       f"Fresh End transition not observed: {wait.evidence}", error=wait.error)

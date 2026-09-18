@@ -217,8 +217,36 @@ def deploy_shaderpack(instance_dir: Path, target_mode: int = 0) -> Path:
     return pack_dir
 
 
+def evidence_log_files(instance_dir: Path) -> List[Path]:
+    # JVM stdout carries the [Shaders] loader lines while latest.log carries
+    # server lines; the exact routing depends on launch flags, so parse both.
+    return [
+        instance_dir / "logs" / "client_stdout.log",
+        instance_dir / "logs" / "latest.log",
+    ]
+
+
+def read_evidence_logs(paths: List[Path], explicit: Optional[Path] = None) -> Tuple[str, List[str], Optional[str]]:
+    """Concatenate all readable evidence logs; fail only if NONE are usable."""
+    sources = [explicit] if explicit else paths
+    parts: List[str] = []
+    parsed: List[str] = []
+    errors: List[str] = []
+    for p in sources:
+        try:
+            parts.append(p.read_text(encoding="utf-8", errors="replace"))
+            parsed.append(str(p))
+        except FileNotFoundError:
+            errors.append(f"missing: {p}")
+        except OSError as exc:
+            errors.append(f"unreadable {p}: {exc}")
+    if not parsed:
+        return "", parsed, "no evidence log readable: " + "; ".join(errors)
+    return "\n".join(parts), parsed, None
+
+
 def parse_shader_logs(log_text: str) -> Dict[str, Any]:
-    """Parse latest.log for OptiFine shader loader events and errors."""
+    """Parse evidence logs for OptiFine shader loader events and errors."""
     results: Dict[str, Any] = {
         "pack_loaded": False,
         "pack_name": None,
@@ -345,7 +373,7 @@ def evaluate_capabilities(
     if pack_loaded and fb_created and not has_errors and len(progs) >= 10:
         stack_status, stack_ev = "PASS", (
             f"Pack '{log_analysis.get('pack_name')}' loaded; framebuffer created; "
-            f"{len(progs)} programs compiled with 0 observed errors"
+            f"{len(progs)} distinct program entries with 0 observed errors"
         )
     elif pack_loaded and has_errors:
         stack_status, stack_ev = "FAIL", f"Pack loaded but errors observed: {errors[:2]}"
@@ -737,17 +765,15 @@ def main() -> int:
         print("Deploy complete (--deploy-only specified).")
         return 0
 
-    log_path = args.parse_log or (args.instance / "logs" / "latest.log")
-    if not log_path.exists():
-        print(f"FAIL: log file not found at {log_path}")
+    log_text, log_sources, log_err = read_evidence_logs(
+        evidence_log_files(args.instance), args.parse_log
+    )
+    if log_err is not None:
+        print(f"FAIL: {log_err}")
         return 1
-    print(f"Analyzing log: {log_path}")
-    try:
-        log_text = log_path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        print(f"FAIL: log read failed: {exc}")
-        return 1
+    print(f"Analyzing logs: {log_sources}")
     log_analysis = parse_shader_logs(log_text)
+    log_analysis["log_sources_parsed"] = log_sources
     shot_dir = args.screenshot_dir
     if shot_dir is not None and not isinstance(shot_dir, Path):
         shot_dir = Path(shot_dir)
