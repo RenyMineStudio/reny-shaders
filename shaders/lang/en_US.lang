@@ -1,0 +1,15 @@
+option.PROBE_MODE=Probe Mode
+option.PROBE_MODE.comment=Selects which architectural capability probe is active.
+value.PROBE_MODE.0=0: Baseline Pass-Through
+value.PROBE_MODE.1=1: Capability Uniforms & Includes
+value.PROBE_MODE.2=2: History & Skip-Clear
+value.PROBE_MODE.3=3: Material ID Mapping
+value.PROBE_MODE.4=4: Buffer Formats (FP16/R11F)
+value.PROBE_MODE.5=5: Deferred Pass Validation
+
+profile.BASELINE=Baseline (Pass-Through)
+profile.CAPABILITY=Capability Probe
+profile.HISTORY=History Probe
+profile.MATERIAL=Material Probe
+profile.FORMATS=Format Probe
+profile.DEFERRED=Deferred Probe

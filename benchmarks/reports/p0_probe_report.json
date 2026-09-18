@@ -1,0 +1,110 @@
+{
+  "timestamp": "2026-09-18T08:46:08.655705+00:00",
+  "commit_sha": "fe4e8a2d061b544db71770be063a8a48a8377b8d",
+  "target_stack": {
+    "minecraft": "1.7.10",
+    "forge": "10.13.4.1614",
+    "optifine": "1.7.10 HD U E7",
+    "java": "openjdk version \"1.8.0_312\""
+  },
+  "hardware_environment": {
+    "gpu": "Mesa Intel(R) Iris(R) Xe Graphics (ADL GT2)",
+    "gpu_vendor": "Intel",
+    "driver": "4.6 (Compatibility Profile) Mesa 25.2.8-0ubuntu0.24.04.2",
+    "glsl": "4.60",
+    "os": "Linux",
+    "kernel": "Linux 7.0.0-30-generic x86_64"
+  },
+  "log_analysis": {
+    "pack_loaded": true,
+    "pack_name": "Reny-Capability-Probe",
+    "worlds_detected": "-1, 1",
+    "programs_loaded": [
+      "gbuffers_basic",
+      "gbuffers_textured",
+      "gbuffers_textured_lit",
+      "gbuffers_skybasic",
+      "gbuffers_skytextured",
+      "gbuffers_clouds",
+      "gbuffers_terrain",
+      "gbuffers_damagedblock",
+      "gbuffers_water",
+      "gbuffers_block",
+      "gbuffers_entities",
+      "gbuffers_hand",
+      "gbuffers_weather",
+      "composite",
+      "final",
+      "shadow",
+      "deferred",
+      "deferred_last",
+      "composite_last"
+    ],
+    "programs_disabled": [],
+    "custom_textures_loaded": [],
+    "errors": [],
+    "warnings": []
+  },
+  "capabilities": {
+    "EXP-P0-STACK": {
+      "status": "PASS",
+      "description": "Forge 1614 + OptiFine E7 client execution and shaderpack loading",
+      "evidence": "Pack 'Reny-Capability-Probe' loaded successfully; 19 programs compiled without error"
+    },
+    "deferred": {
+      "status": "PASS",
+      "description": "Deferred execution stage between terrain and translucent pass",
+      "evidence": "Program loaded: deferred confirmed in E7 runtime log"
+    },
+    "composite": {
+      "status": "PASS",
+      "description": "Post-translucent composite rendering stage",
+      "evidence": "Program loaded: composite confirmed in E7 runtime log"
+    },
+    "final": {
+      "status": "PASS",
+      "description": "Screen presentation pass",
+      "evidence": "Program loaded: final confirmed in E7 runtime log"
+    },
+    "shadow": {
+      "status": "PASS",
+      "description": "Directional shadow depth render pass",
+      "evidence": "Program loaded: shadow confirmed in E7 runtime log"
+    },
+    "includes": {
+      "status": "PASS",
+      "description": "GLSL #include preprocessor directive support",
+      "evidence": "Shaders using relative and root-based #include directives compiled without error"
+    },
+    "world<id>": {
+      "status": "PASS",
+      "description": "Per-dimension shader folder overrides (world0, world-1, world1)",
+      "evidence": "OptiFine scanned and logged: Worlds: -1, 1"
+    },
+    "profiles/options": {
+      "status": "PASS",
+      "description": "Profile declarations and shader options menu support",
+      "evidence": "shaders.properties parsed without error; PROBE_MODE option registered"
+    },
+    "block.properties": {
+      "status": "PASS",
+      "description": "Block ID alias and Forge namespaced block mapping",
+      "evidence": "block.properties parsed; mapped IDs (100-122) active on mc_Entity.x attribute"
+    },
+    "buffer_formats": {
+      "status": "PASS",
+      "description": "Wide/compact buffer formats: RGBA16F, R11F_G11F_B10F, RGBA32F",
+      "evidence": "FBO formats accepted by driver without GL_FRAMEBUFFER_INCOMPLETE or format failure"
+    },
+    "colortex_skip_clear": {
+      "status": "PASS",
+      "description": "Skip framebuffer clear on specified color attachments",
+      "evidence": "colortex3Clear = false recognized; buffer persistence active in composite stage"
+    },
+    "scale.<program>": {
+      "status": "REJECTED",
+      "description": "Internal program/buffer resolution scaling directive",
+      "evidence": "Bytecode analysis of OptiFine E7 Shaders.class confirms scale.<program> is absent in 1.7.10 E7 (historical commit 5b0151b4 in 2018 is post-E7)"
+    }
+  }
+}

@@ -1,0 +1,27 @@
+# Runtime and logs
+logs/
+*.log
+*.log.gz
+crash-reports/
+dumps/
+
+# Local execution and sandbox directories
+run/
+test-runtime/
+sandbox/
+*.tmp
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Temporary outputs
+/tmp/

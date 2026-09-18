@@ -40,7 +40,7 @@ Sempre separar:
 | half-float formats | limitado | E3+ | CONFIRMED E7 |
 | R11F_G11F_B10F | não clássico | D7+ | CONFIRMED E7 |
 | relative size.buffer | não | não provado; histórico moderno | DO NOT ASSUME |
-| scale.<program> | não | clue histórico, build não fechado | EXPERIMENT REQUIRED |
+| scale.<program> | não | ausente no bytecode E7; commit 2018 é posterior | REJECTED E7 |
 | object motion vectors | não | não | FAILED |
 | camera-only reprojection | matemática possível | possível | PLAUSIBLE |
 | full-scene TAA | inadequado | inadequado sem velocity | REJECT DEFAULT |
@@ -53,6 +53,24 @@ Sempre separar:
 OptiFine 1.7.10 D7 trouxe o engine de shaders da linha 1.8.8 para 1.7.10. Releases posteriores adicionaram/corrigiram features relevantes até E7.
 
 Implicação: dizer apenas “Minecraft 1.7.10 shaders” é tecnicamente insuficiente.
+
+### Validação empírica no stack-alvo (Forge 1614 + OptiFine E7 + Mesa Intel Iris Xe)
+
+Executado no cliente Minecraft 1.7.10 real através do probe P0 versionado:
+
+- **Pipeline base:** 19 programas GLSL 1.20 compilaram e executaram sem erros OpenGL ou GLSL (`gbuffers_*`, `deferred`, `composite`, `final`, `shadow`).
+- **Deferred stage:** confirmado funcional entre terrain e water. `deferred.fsh` comunica com `composite` via `colortex4` com flip automático de ping-pong (`flipped buffers after deferred: 0, 4`) e restauração por `deferred_last`.
+- **Skip-clear & history (`colortex3Clear = false`):** confirmado. OptiFine registrou `colortex3 clear disabled` e o probe demonstrou persistência temporal visual estável de 25–30 frames.
+- **Reset de history:**
+  - *Resize:* FBO e buffers são recriados na nova resolução sem crash ou distorção.
+  - *Reload:* pipeline é reinicializado do zero e o buffer é zerado.
+  - *Teleporte:* o buffer de histórico NÃO é limpo automaticamente pelo host; reprojeção temporal deve checar descontinuidade de câmera (`distance(cameraPosition, previousCameraPosition) > threshold`) para evitar ghosting.
+  - *Troca de dimensão:* `checkWorldChanged` chama `Shaders.uninit()`, reinicializando buffers e isolando dimensões.
+- **Formatos de buffer:** `RGBA16F` (`colortex2`), `R11F_G11F_B10F` (`colortex4`) e `RGBA32F` (`colortex1`) foram aceitos pelo driver Mesa Intel sem `GL_FRAMEBUFFER_INCOMPLETE`.
+- **World folders (`world<id>`):** `world-1` (Nether) e `world1` (The End) foram detectados e carregados dinamicamente na troca de dimensão. Se uma pasta `world<id>` existe, OptiFine busca shaders exclusivamente nela (usando fallback interno para programas não definidos), sem herdar arquivos do diretório raiz `/shaders`.
+- **Profiles & Options:** `shaders.properties` e opções declaradas em comentários (`#define PROBE_MODE ... // [0 1 2 3 4 5]`) geram telas de menu interativas com nomes e tooltips de `en_US.lang`, e persistem em `optionsshaders.txt`.
+- **Uniforms dinâmicos:** `frameCounter`, `frameTime`, `frameTimeCounter`, `worldTime` e `sunPosition` validados em tempo real via HUD de diagnóstico.
+- **GLSL 1.20 legacy:** operador de módulo inteiro `%` é reservado em 1.20 e deve usar `mod(float, float)`. Formatos em `composite.fsh` devem ser declarados dentro de comentários para leitura pelo `ShaderPackParser` sem violar a gramática do compilador GLSL.
 
 ### Material mapping existe no E7
 
@@ -96,6 +114,7 @@ Continuam abertos:
 
 ## Claims rejeitados/corrigidos
 
+- “scale.<program> existe no OptiFine 1.7.10 E7” — falso. Inspecionado no bytecode de `Shaders.class` e `ShaderPackParser.class` do JAR E7 oficial; a funcionalidade de composite scale foi adicionada apenas em 2018 (commit `5b0151b4`), portanto é posterior à era 1.7.10.
 - “OptiFine 1.7.10 não tem block.properties/world folders/skip-clear” — falso para D7–E7.
 - “Quarter-res buffers são nativos no E7” — não sustentado.
 - “shadowPassInterval é knob de shaderpack clássico” — símbolo interno existe, mas o path inspecionado fixa o intervalo.
@@ -103,6 +122,8 @@ Continuam abertos:
 - “skip-clear viola OpenGL por definição” — incompatível com a própria capability documentada do E7.
 - “biome/category uniform moderno e at_midBlock são garantidos no E7” — contaminação de documentação moderna.
 - “full-scene TAA é fundação segura” — rejeitado para Default.
+- “Operador `%` é válido em GLSL 1.20” — falso. Módulo inteiro é reservado e causa erro de compilação; requer `mod(float, float)`.
+- “Diretivas de formato `colortex<n>Format` podem ficar como declarações GLSL executáveis” — falso. `RGBA16F`, `R11F_G11F_B10F`, etc. não são identificadores válidos em GLSL 1.20; devem ser declarados dentro de comentários para leitura pelo parser do OptiFine sem falhar na compilação.
 
 ## Fontes primárias/decisivas
 
