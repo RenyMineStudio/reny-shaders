@@ -100,6 +100,7 @@ MENU_OPTIONS_DONE = (0.500, 0.890)
 CONFIRM_TIME_SET = r"Set the time to"
 CONFIRM_TELEPORTED = r"Teleported RenyTester"
 CONFIRM_BLOCK_PLACED = r"Block placed"
+CONFIRM_SEED = r"Seed:"
 
 
 def compute_sha256(path: Path) -> str:
@@ -514,6 +515,27 @@ class P0Suite:
             time.sleep(1.0)
         return False, "", f"command {command!r} unverified after 2 attempts: {last_err}"
 
+    def ensure_in_game(self, tries: int = 4) -> Tuple[bool, Optional[str]]:
+        """Prove the player is in-game (not in a menu/title/death screen).
+
+        Uses the harmless `/seed` probe: only an in-game chat accepts and
+        answers it. Between attempts a single Escape collapses any open
+        menu/chat toward the game. GUI flows must call this first so they
+        never start navigating from an unknown screen (which previously
+        cascaded onto the title screen and clicked Realms).
+        """
+        last_err: Optional[str] = None
+        for attempt in range(1, tries + 1):
+            ok, _, err = self.send_chat_command_verified("/seed", CONFIRM_SEED, timeout=10.0)
+            if ok:
+                return True, None
+            last_err = err
+            res = run_checked(["xdotool", "key", "Escape"])
+            if not res.ok:
+                return False, f"ensure_in_game: Escape failed: {res.error}"
+            time.sleep(1.5)
+        return False, f"not verifiably in-game after {tries} attempts: {last_err}"
+
     def resize_window(self, geometry: str) -> Tuple[bool, Optional[str]]:
         res = run_checked(["wmctrl", "-r", "Minecraft 1.7.10", "-e", geometry])
         if not res.ok:
@@ -571,9 +593,9 @@ class P0Suite:
             return False, "", "reload aborted, log cursor failed: " + "; ".join(
                 f"{c.path.name}: {c.error}" for c in bad)
 
-        ok, ferr = self.focus_window()
+        ok, gerr = self.ensure_in_game()
         if not ok:
-            return False, "", f"reload aborted, focus failed: {ferr}"
+            return False, "", f"reload aborted, not in-game: {gerr}"
 
         failures: List[str] = []
 
@@ -584,7 +606,7 @@ class P0Suite:
             if sleep_after:
                 time.sleep(sleep_after)
 
-        step(["xdotool", "key", "Escape"], 0.5)
+        step(["xdotool", "key", "Escape"], 1.5)
         nav = [
             (MENU_PAUSE_OPTIONS, 0.8, "Options..."),
             (MENU_OPTIONS_VIDEO, 0.8, "Video Settings..."),
@@ -623,15 +645,15 @@ class P0Suite:
             # Missing key before the cycle is a hard diagnostic, not silent.
             return False, before, None, f"pre-cycle PROBE_MODE unreadable: {rerr}"
 
-        ok, ferr = self.focus_window()
+        ok, gerr = self.ensure_in_game()
         if not ok:
-            return False, before, None, f"mode cycle aborted, focus failed: {ferr}"
+            return False, before, None, f"mode cycle aborted, not in-game: {gerr}"
 
         failures: List[str] = []
         res = run_checked(["xdotool", "key", "Escape"])
         if not res.ok:
             failures.append(f"Escape -> {res.error}")
-        time.sleep(0.5)
+        time.sleep(1.5)
         nav = [
             (MENU_PAUSE_OPTIONS, 0.8, "Options..."),
             (MENU_OPTIONS_VIDEO, 0.8, "Video Settings..."),
@@ -780,6 +802,14 @@ class P0Suite:
             self.write_manifest(tested_tree_sha)
             return 1
         self.record_gate("client_window_present", "PASS", f"Minecraft window active (ID: {w})")
+        ok_g, gerr = self.ensure_in_game()
+        if not ok_g:
+            self.record_gate("player_in_game_fixture", "FAIL",
+                              "Player not verifiably in-game at suite start; aborting",
+                              error=gerr)
+            self.write_manifest(tested_tree_sha)
+            return 1
+        self.record_gate("player_in_game_fixture", "PASS", "Player in-game (/seed answered)")
 
         # -----------------------------------------------------------------
         # 1. EXP-P0-STACK: Overworld baseline
