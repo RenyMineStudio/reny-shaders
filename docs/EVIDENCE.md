@@ -31,11 +31,11 @@ Sempre separar:
 | deferred passes | não | E7 | CONFIRMED E7 |
 | profiles/options | não | D7+ | CONFIRMED E7 |
 | include | não | D7+ | CONFIRMED E7 |
-| block.properties | não | D7/D8+, fixes E3/E7 | CONFIRMED E7 |
-| Forge mod block mapping | não | E7 | CONFIRMED E7 |
+| block.properties | não | D7/D8+, fixes E3/E7 | CONFIRMED E7 (vanilla) |
+| Forge mod block mapping | não | parser aceito; cobertura modded não exercitada no P0 | UNPROVEN / INCONCLUSIVE |
 | world<id> folders | não | D7+ | CONFIRMED E7 |
-| custom textures | não | D7+ | CONFIRMED E7 |
-| custom noise | não | E6+ | CONFIRMED E7 |
+| custom textures | não | parser D7+; assets não carregados no probe P0 | UNPROVEN / INCONCLUSIVE |
+| custom noise | não | parser E6+; texture.noise não carregado no probe P0 | UNPROVEN / INCONCLUSIVE |
 | custom uniforms | não | E7 | CONFIRMED E7 |
 | half-float formats | limitado | E3+ | CONFIRMED E7 |
 | R11F_G11F_B10F | não clássico | D7+ | CONFIRMED E7 |
@@ -100,13 +100,12 @@ Quarter-res bloom/AO não pode ser requisito arquitetural até um path real ser 
 
 Continuam abertos:
 
-- scale.<program> efetivo no build E7 exato;
-- reset/validade de history após resize, reload, FOV, teleporte e dimensão;
+- cobertura de material mapping em mods reais do The Reawakening (parser comprovado no E7, mas cobertura modded não exercitada no probe P0);
+- custom textures e custom noise no workload real (mecanismo previsto no parser, mas não carregado no probe P0);
 - custo do ping-pong em Intel antiga;
 - melhor formato por attachment;
 - número prático de MRTs;
-- metadata/material mapping em todos os paths modded;
-- semântica de custom dimensions;
+- semântica de custom dimensions modded;
 - frequência reduzida de shadow sem suporte mod-side;
 - bloom barato sem relative-size attachment;
 - FastCraft + E7 + stack final;

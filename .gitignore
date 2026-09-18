@@ -25,3 +25,7 @@ __pycache__/
 
 # Temporary outputs
 /tmp/
+
+# Binary test captures / screenshots (AGENTS.md asset hygiene policy)
+*.png
+benchmarks/artifacts/**/*.png

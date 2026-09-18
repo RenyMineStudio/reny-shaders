@@ -1,6 +1,7 @@
 {
-  "timestamp": "2026-09-18T08:46:08.655705+00:00",
-  "commit_sha": "fe4e8a2d061b544db71770be063a8a48a8377b8d",
+  "timestamp": "2026-09-18T17:15:04.654911+00:00",
+  "commit_sha": "2606f53099566b621ec3c6be2a84805109ee574b",
+  "working_tree_clean": true,
   "target_stack": {
     "minecraft": "1.7.10",
     "forge": "10.13.4.1614",
@@ -19,6 +20,37 @@
     "pack_loaded": true,
     "pack_name": "Reny-Capability-Probe",
     "worlds_detected": "-1, 1",
+    "block_mapping_parsed": true,
+    "block_mapping_warnings": [
+      "[23:48:19] [Client thread/WARN]: [OptiFine] Shaders: Block not found for name: thaumcraft:blockCustomOre",
+      "[23:48:19] [Client thread/WARN]: [OptiFine] Shaders: Block not found for name: thaumcraft:blockMagicalLog",
+      "[23:48:19] [Client thread/WARN]: [OptiFine] [Shaders] Invalid block ID mapping: block.120=thaumcraft:blockCustomOre thaumcraft:blockMagicalLog",
+      "[23:48:19] [Client thread/WARN]: [OptiFine] Shaders: Block not found for name: biomesoplenty:foliage",
+      "[23:48:19] [Client thread/WARN]: [OptiFine] Shaders: Block not found for name: biomesoplenty:leaves1",
+      "[23:48:19] [Client thread/WARN]: [OptiFine] [Shaders] Invalid block ID mapping: block.121=biomesoplenty:foliage biomesoplenty:leaves1",
+      "[23:48:19] [Client thread/WARN]: [OptiFine] Shaders: Block not found for name: ic2:blockOreCopper",
+      "[23:48:19] [Client thread/WARN]: [OptiFine] Shaders: Block not found for name: ic2:blockOreTin",
+      "[23:48:19] [Client thread/WARN]: [OptiFine] [Shaders] Invalid block ID mapping: block.122=ic2:blockOreCopper ic2:blockOreTin"
+    ],
+    "custom_uniforms": [
+      "reny_sun_y",
+      "reny_in_water",
+      "reny_time"
+    ],
+    "buffer_formats": {
+      "colortex0": "RGBA8",
+      "colortex1": "RGBA32F",
+      "colortex2": "RGBA16F",
+      "colortex3": "RGBA8",
+      "colortex4": "R11F_G11F_B10F"
+    },
+    "skip_clear_buffers": [
+      "colortex3"
+    ],
+    "ping_pong_flips": [
+      "[23:49:41] [Client thread/INFO]: [Shaders] flipped buffers after deferred: 0, 4",
+      "[23:49:41] [Client thread/INFO]: [Shaders] flipped buffers after composite: 0, 3, 4"
+    ],
     "programs_loaded": [
       "gbuffers_basic",
       "gbuffers_textured",
@@ -42,69 +74,109 @@
     ],
     "programs_disabled": [],
     "custom_textures_loaded": [],
+    "custom_noise_loaded": false,
+    "framebuffer_created": true,
     "errors": [],
     "warnings": []
   },
   "capabilities": {
     "EXP-P0-STACK": {
       "status": "PASS",
-      "description": "Forge 1614 + OptiFine E7 client execution and shaderpack loading",
-      "evidence": "Pack 'Reny-Capability-Probe' loaded successfully; 19 programs compiled without error"
+      "description": "Forge 1614 + OptiFine E7 minimal pipeline execution on target hardware",
+      "evidence": "Pack 'Reny-Capability-Probe' loaded; framebuffer created; 19 programs compiled cleanly with 0 errors",
+      "notes": "Verified in Overworld, Nether, and End with real client execution"
     },
     "deferred": {
       "status": "PASS",
-      "description": "Deferred execution stage between terrain and translucent pass",
-      "evidence": "Program loaded: deferred confirmed in E7 runtime log"
+      "description": "Deferred pass stage execution between terrain and translucent passes",
+      "evidence": "Log confirms 'Program loaded: deferred', buffer flip (0, 4), and 'deferred_last' restore",
+      "notes": "Verified visually via green diagnostic banner in Mode 5"
     },
     "composite": {
       "status": "PASS",
       "description": "Post-translucent composite rendering stage",
-      "evidence": "Program loaded: composite confirmed in E7 runtime log"
+      "evidence": "Log confirms 'Program loaded: composite' (flips: 2)",
+      "notes": "Runs at full display resolution in E7"
     },
     "final": {
       "status": "PASS",
-      "description": "Screen presentation pass",
-      "evidence": "Program loaded: final confirmed in E7 runtime log"
+      "description": "Final presentation pass rendering directly to screen",
+      "evidence": "Log confirms 'Program loaded: final'",
+      "notes": "Displays probe HUD, mode badges, and composite buffer outputs"
     },
     "shadow": {
       "status": "PASS",
       "description": "Directional shadow depth render pass",
-      "evidence": "Program loaded: shadow confirmed in E7 runtime log"
+      "evidence": "Log confirms 'Program loaded: shadow'",
+      "notes": "Minimal shadow pass compiled cleanly without error"
     },
     "includes": {
       "status": "PASS",
-      "description": "GLSL #include preprocessor directive support",
-      "evidence": "Shaders using relative and root-based #include directives compiled without error"
+      "description": "GLSL #include preprocessor directive support in E7",
+      "evidence": "Shaders using root-based (#include '/lib/...') and relative includes compiled with 0 errors",
+      "notes": "Nested includes up to depth 10 supported by OptiFine preprocessor"
     },
     "world<id>": {
       "status": "PASS",
-      "description": "Per-dimension shader folder overrides (world0, world-1, world1)",
-      "evidence": "OptiFine scanned and logged: Worlds: -1, 1"
+      "description": "Per-dimension shader folder overrides (world-1, world1)",
+      "evidence": "OptiFine scanned and registered: Worlds: -1, 1",
+      "notes": "World folder completely replaces root folder for programs in that dimension"
     },
     "profiles/options": {
       "status": "PASS",
       "description": "Profile declarations and shader options menu support",
-      "evidence": "shaders.properties parsed without error; PROBE_MODE option registered"
+      "evidence": "shaders.properties parsed without error; PROBE_MODE option registered and GUI screens rendered",
+      "notes": "Verified in-game with localized labels from en_US.lang"
     },
-    "block.properties": {
+    "block.properties (vanilla)": {
       "status": "PASS",
-      "description": "Block ID alias and Forge namespaced block mapping",
-      "evidence": "block.properties parsed; mapped IDs (100-122) active on mc_Entity.x attribute"
+      "description": "Vanilla block ID alias mapping via shaders/block.properties",
+      "evidence": "Log confirms 'Parsing block mappings: /shaders/block.properties'; vanilla IDs 100-109 parsed cleanly",
+      "notes": "Mapped IDs (100-109) passed to vertex stage via mc_Entity.x attribute"
     },
-    "buffer_formats": {
+    "Forge mod block mapping": {
+      "status": "INCONCLUSIVE / UNPROVEN",
+      "description": "Forge namespaced block ID mapping (e.g. thaumcraft:*, biomesoplenty:*)",
+      "evidence": "Parser mechanism accepted, but target mods absent in baseline (9 'Block not found' warnings); modded mapping not exercised",
+      "notes": "Parser functions without crashing; full modded coverage requires modded workload"
+    },
+    "custom textures / noise": {
+      "status": "INCONCLUSIVE / UNPROVEN",
+      "description": "Custom textures and custom noise texture loading via shaders.properties",
+      "evidence": "Custom texture/noise assets not loaded or not logged in this probe run",
+      "notes": "Mechanism documented in E7 doc/shaders.properties; assets unexercised in P0 minimal probe"
+    },
+    "buffer_formats (FP16 / R11F)": {
       "status": "PASS",
       "description": "Wide/compact buffer formats: RGBA16F, R11F_G11F_B10F, RGBA32F",
-      "evidence": "FBO formats accepted by driver without GL_FRAMEBUFFER_INCOMPLETE or format failure"
+      "evidence": "Log confirms colortex2 format: RGBA16F (RGBA16F) and colortex4 format: R11F_G11F_B10F (R11F_G11F_B10F) without FBO error",
+      "notes": "Accepted by Mesa Intel Iris Xe driver without GL_FRAMEBUFFER_INCOMPLETE"
     },
     "colortex_skip_clear": {
       "status": "PASS",
-      "description": "Skip framebuffer clear on specified color attachments",
-      "evidence": "colortex3Clear = false recognized; buffer persistence active in composite stage"
+      "description": "Skip framebuffer clear on specified color attachment (colortex3Clear = false)",
+      "evidence": "Log confirms 'colortex3 clear disabled'; visual persistence confirmed across frames",
+      "notes": "Enables persistent temporal history buffer in E7"
+    },
+    "frameCounter / frameTime": {
+      "status": "PASS",
+      "description": "Built-in frame counter and frame delta time uniforms",
+      "evidence": "Built-in uniforms frameCounter and frameTime referenced and rendered live on HUD without error",
+      "notes": "Visual heartbeat and frame time bar responsive in Mode 1"
     },
     "scale.<program>": {
-      "status": "REJECTED",
-      "description": "Internal program/buffer resolution scaling directive",
-      "evidence": "Bytecode analysis of OptiFine E7 Shaders.class confirms scale.<program> is absent in 1.7.10 E7 (historical commit 5b0151b4 in 2018 is post-E7)"
+      "status": "REJECTED IN E7",
+      "description": "Internal composite/deferred program downscaling directive",
+      "evidence": "Inspected Shaders.class and ShaderPackParser.class in OptiFine E7 jar: scale.<program> symbols absent (commit 5b0151b4 was in 2018, post-E7)",
+      "notes": "OptiFine 1.7.10 E7 does not support program scaling; feature added in 2018 post-E7"
     }
+  },
+  "anecdotal_observations": {
+    "fps_range_pass_through": "160-191 FPS (observed via F3 screen)",
+    "fps_range_diagnostic_hud": "120-136 FPS (observed via F3 screen)",
+    "fps_range_nether": "140-165 FPS (observed via F3 screen)",
+    "fps_range_end": "170-195 FPS (observed via F3 screen)",
+    "memory_usage": "11% - 28% of 5461MB allocated",
+    "note": "FPS values are anecdotal runtime observations from F3, not reproducible GPU timer benchmarks"
   }
 }
