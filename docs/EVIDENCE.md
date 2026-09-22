@@ -64,8 +64,8 @@ Proveniência exata (tested tree SHA, gates e delta allowlisted) em
 ### Preflight semântico MCP
 
 O repositório possui integração project-local com o `minecraft-dev-toolkit` em
-`opencode.json` e `.opencode/plugins/minecraft-mcp-guard.js`. No preflight
-real de 2026-09-22, o bridge Forge standalone foi carregado no cliente e o
+`opencode.json`, `.opencode/plugins/minecraft-mcp-guard.js` e `.omp/mcp.json`.
+No preflight real de 2026-09-22, o bridge Forge standalone foi carregado no cliente e o
 transporte MCP respondeu:
 
 - `minecraft_ping` → `{"ok":true}`;
@@ -76,9 +76,12 @@ transporte MCP respondeu:
 
 Isso prova somente o canal semântico e não promove capability visual a PASS.
 Screenshots, logs e execução de `run_p0_suite.py` continuam obrigatórios para
-claims visuais/GPU. O fallback de ação GUI permanece bloqueado por
-`CAPABILITY_UNAVAILABLE`; a lacuna foi reportada em
-https://github.com/RenyMineStudio/minecraft-dev-toolkit/issues/16.
+claims visuais/GPU. No OMP 18.2.8, `/mcp reload` descobriu o servidor project-local,
+`/mcp list` mostrou `minecraft-dev` conectado via stdio e `/mcp test minecraft-dev`
+conectou ao servidor `minecraft-dev v0.1.0` com 11 tools. Isso prova discovery e
+transporte MCP no OMP, não disponibilidade de cada capability no cliente Forge.
+A lacuna de navegação GUI registrada em `minecraft-dev-toolkit#16` foi concluída
+upstream; a P0 ainda requer reexecução completa no stack alvo.
 
 > **Proveniência:** os itens de execução abaixo são registro histórico pré-hardening e permanecem **PENDING REVALIDATION** até um relatório gerado pela suite completa com tree SHA, bridge MCP e gates target-specific. Não promovê-los a CONFIRMED no PR atual.
 
