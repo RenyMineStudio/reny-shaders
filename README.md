@@ -110,6 +110,14 @@ Primeiro milestone: **sem bloom dedicado, sem SSAO dedicado, sem temporal histor
 - [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md) — P0/P1/P2, cenas e métricas de benchmark.
 - [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — riscos e smoke classes para o ecossistema 1.7.10 modded.
 
+## Tooling agentivo
+
+Quando a integração do shared Minecraft Dev Toolkit for ativada neste repo, OpenCode V2 e OMP devem ser configurados explicitamente e de forma independente para o mesmo servidor lógico `minecraft-dev`: `opencode.json` usa `mcp.servers.minecraft-dev` e `.omp/mcp.json` usa `mcpServers.minecraft-dev`.
+
+Não dependa de OMP importar `opencode.json` automaticamente. O shaderpack continua sem Forge code próprio; o MCP é tooling project-local e deve apontar para um runtime/bridge externo compatível. O guard OpenCode não implica enforcement equivalente no OMP.
+
+Até a Issue #2 implementar essa integração, a ausência desses arquivos continua sendo estado esperado, não autorização para criar um bridge Forge dentro do shaderpack.
+
 ## Prioridade imediata
 
 A próxima etapa não é “deixar bonito”. É construir um **capability/smoke probe versionado para E7** e um harness de benchmark reproduzível. Só depois entram atmosfera, sombras, água e emissivos em ordem de ROI.
