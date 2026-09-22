@@ -319,6 +319,19 @@ DIM_SWITCH_FRESH_PATTERN = (
 )
 
 
+def dimension_pattern_for(target: str) -> str:
+    """Return only target-specific evidence for a fresh dimension transition."""
+    patterns = {
+        "overworld": r"Loading dimension 0|Program loaded: world0/|world0/",
+        "nether": r"Loading dimension -1|Program loaded: world-1/|world-1/",
+        "end": r"Loading dimension 1|Program loaded: world1/|world1/",
+    }
+    try:
+        return patterns[target]
+    except KeyError as exc:
+        raise ValueError(f"unknown dimension target: {target}") from exc
+
+
 def read_probe_mode_option(options_path: Path = OPTIONS_SHADERS_PATH) -> Tuple[Optional[int], Optional[str]]:
     """Read persisted PROBE_MODE from optionsshaders.txt (runtime file, not tracked)."""
     try:
@@ -997,7 +1010,7 @@ class P0Suite:
                 self.record_gate("dim_nether_command", "FAIL", "Server did not confirm Nether portal setblock", error=cerr)
             else:
                 self.record_gate("dim_nether_command", "PASS", f"Nether portal server-confirmed: {evidence}")
-                wait = wait_for_fresh_combined(cursors, DIM_SWITCH_FRESH_PATTERN, timeout=45.0)
+                wait = wait_for_fresh_combined(cursors, dimension_pattern_for("nether"), timeout=45.0)
                 if not wait.matched:
                     self.record_gate("dim_nether_transition", "FAIL",
                                       f"Fresh Nether transition not observed: {wait.evidence}", error=wait.error)
@@ -1027,7 +1040,7 @@ class P0Suite:
             if not ok_c:
                 self.record_gate("dim_return_command", "FAIL", "Server did not confirm return portal setblock", error=cerr)
             else:
-                wait = wait_for_fresh_combined(cursors, DIM_SWITCH_FRESH_PATTERN, timeout=45.0)
+                wait = wait_for_fresh_combined(cursors, dimension_pattern_for("overworld"), timeout=45.0)
                 if not wait.matched:
                     self.record_gate("dim_return_transition", "FAIL",
                                       f"Fresh Overworld return not observed: {wait.evidence}", error=wait.error)
@@ -1054,7 +1067,7 @@ class P0Suite:
                 self.record_gate("dim_end_command", "FAIL", "Server did not confirm end portal setblock", error=cerr)
             else:
                 self.record_gate("dim_end_command", "PASS", f"End portal server-confirmed: {evidence}")
-                wait = wait_for_fresh_combined(cursors, DIM_SWITCH_FRESH_PATTERN, timeout=45.0)
+                wait = wait_for_fresh_combined(cursors, dimension_pattern_for("end"), timeout=45.0)
                 if not wait.matched:
                     self.record_gate("dim_end_transition", "FAIL",
                                       f"Fresh End transition not observed: {wait.evidence}", error=wait.error)

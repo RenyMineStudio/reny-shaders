@@ -37,16 +37,22 @@ cp_entries.append(str(install_dir / 'versions/1.7.10/1.7.10.jar'))
 print(':'.join(cp_entries))
 ")
 
-mkdir -p "$INSTANCE_DIR/logs"
+JAVA_OPTS=(
+  -Djava.library.path="$NATIVES_DIR"
+  -Xmx4096m -Xms512m
+  -Dfml.ignorePatchDiscrepancies=true
+  -Dfml.ignoreInvalidMinecraftCertificates=true
+  -DlibraryDirectory="$INSTALL_DIR/libraries"
+  -Duser.language=en
+)
+if [[ -n "${MINECRAFT_JAVA_OPTS:-}" ]]; then
+  # shellcheck disable=SC2206
+  JAVA_OPTS+=( ${MINECRAFT_JAVA_OPTS} )
+fi
 
 nohup "$JAVA_BIN" \
-  -Djava.library.path="$NATIVES_DIR" \
+  "${JAVA_OPTS[@]}" \
   -cp "$CP" \
-  -Xmx4096m -Xms512m \
-  -Dfml.ignorePatchDiscrepancies=true \
-  -Dfml.ignoreInvalidMinecraftCertificates=true \
-  -DlibraryDirectory="$INSTALL_DIR/libraries" \
-  -Duser.language=en \
   net.minecraft.launchwrapper.Launch \
   --username RenyTester \
   --version forge-10.13.4.1614 \

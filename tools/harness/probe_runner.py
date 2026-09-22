@@ -245,6 +245,23 @@ def read_evidence_logs(paths: List[Path], explicit: Optional[Path] = None) -> Tu
     return "\n".join(parts), parsed, None
 
 
+_CDATA_RE = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.DOTALL)
+_XML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def normalize_log_line(line: str) -> str:
+    """Return the semantic payload from plain text or Log4j XML output."""
+    match = _CDATA_RE.search(line)
+    if match:
+        return match.group(1).strip()
+    return _XML_TAG_RE.sub("", line).strip()
+
+
+def _append_unique(items: List[Any], value: Any) -> None:
+    if value not in items:
+        items.append(value)
+
+
 def parse_shader_logs(log_text: str) -> Dict[str, Any]:
     """Parse evidence logs for OptiFine shader loader events and errors."""
     results: Dict[str, Any] = {
@@ -256,7 +273,7 @@ def parse_shader_logs(log_text: str) -> Dict[str, Any]:
         "block_mapping_warnings": [],
         "block_mapping_invalid_ids": [],
         "probe_mode_registration": False,
-        "probe_mode_transition_values": [],
+        "world_folder_loads": [],
         "uniforms_exercised": False,
         "custom_uniforms": [],
         "buffer_formats": {},
@@ -271,6 +288,7 @@ def parse_shader_logs(log_text: str) -> Dict[str, Any]:
         "warnings": [],
     }
     for line in log_text.splitlines():
+        line = normalize_log_line(line)
         if "[Shaders] Loaded shaderpack:" in line:
             results["pack_loaded"] = True
             results["pack_name"] = line.split("Loaded shaderpack:", 1)[1].strip()
@@ -279,6 +297,10 @@ def parse_shader_logs(log_text: str) -> Dict[str, Any]:
             results["pack_name"] = line.split("Loading shader pack:", 1)[1].strip()
         elif "[Shaders] Worlds:" in line:
             results["worlds_detected"] = line.split("Worlds:", 1)[1].strip()
+        elif re.search(r"(?:Loading dimension|Program loaded:)\s*-1|world-1/", line, re.IGNORECASE):
+            results["world_folder_loads"].append("world-1/")
+        elif re.search(r"(?:Loading dimension|Program loaded:)\s*1|world1/", line, re.IGNORECASE):
+            results["world_folder_loads"].append("world1/")
         elif "Parsing block mappings:" in line:
             results["block_mapping_parsed"] = True
         elif "[Shaders] Invalid block ID mapping:" in line or "Block not found for name:" in line:
@@ -323,6 +345,13 @@ def parse_shader_logs(log_text: str) -> Dict[str, Any]:
             results["errors"].append(line.strip())
         elif "OpenGL error" in line or "GL_INVALID" in line:
             results["errors"].append(line.strip())
+    for key in (
+        "block_mapping_warnings", "block_mapping_invalid_ids",
+        "block_mapping_accepted_ids", "custom_uniforms", "skip_clear_buffers",
+        "ping_pong_flips", "programs_loaded", "programs_disabled",
+        "custom_textures_loaded", "errors", "warnings",
+    ):
+        results[key] = list(dict.fromkeys(results[key]))
     return results
 
 
@@ -437,6 +466,25 @@ def evaluate_capabilities(
     capabilities["shadow"] = {
         "status": s_st, "description": "Directional shadow depth pass loaded",
         "evidence": s_ev, "notes": "Minimal shadow pass compiled without observed error",
+    }
+
+    # 6b. world<id>: target-specific runtime folders, not generic renderer reloads.
+    worlds = str(log_analysis.get("worlds_detected") or "")
+    loaded_folders = set(log_analysis.get("world_folder_loads", []))
+    required_folders = {"world-1/", "world1/"}
+    if required_folders.issubset(loaded_folders):
+        w_st, w_ev = "PASS", f"Runtime loaded target folders: {sorted(required_folders)}"
+    elif pack_loaded and any(token in worlds for token in ("-1", "1")):
+        w_st, w_ev = "INCONCLUSIVE", (
+            "World IDs were listed, but target-specific folder load evidence is incomplete"
+        )
+    else:
+        w_st, w_ev = fail_or_inconclusive(), "No target-specific world<id> runtime evidence"
+    capabilities["world<id>"] = {
+        "status": w_st,
+        "description": "OptiFine E7 world<id> dimension routing",
+        "evidence": w_ev,
+        "notes": "Generic renderer reset/reload lines do not prove dimension routing",
     }
 
     # 6. includes: predicate is clean compile of shaders that contain #include lines.
@@ -602,6 +650,10 @@ def evaluate_capabilities(
     }
 
     return capabilities
+
+def evaluator_exit_code(capabilities: Dict[str, Any]) -> int:
+    """Return the process status used by the strict capability evaluator."""
+    return 2 if mandatory_failures(capabilities) else 0
 
 
 def mandatory_failures(capabilities: Dict[str, Any]) -> List[str]:
@@ -792,7 +844,7 @@ def main() -> int:
         failed = failed_now
 
     # Explicit exit policy: mandatory FAIL => non-zero; INCONCLUSIVE alone => zero.
-    return 2 if failed else 0
+    return evaluator_exit_code(capabilities)
 
 
 if __name__ == "__main__":

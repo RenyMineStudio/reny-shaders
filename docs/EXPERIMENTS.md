@@ -48,12 +48,9 @@ Sucesso:
 
 Falha bloqueia a baseline atual.
 
-**Resultado do teste (2026-09-18): PASS**
-- Testado no hardware real: Mesa Intel(R) Iris(R) Xe Graphics (ADL GT2), Mesa 25.2.8.
-- 19 programas GLSL 1.20 compilaram e executaram sem nenhum erro GLSL ou OpenGL.
-- Overworld (dia/noite), Nether (DIM -1) e The End (DIM 1) validados com renderização contínua.
-- Câmera parada, em movimento e resize de janela testados com sucesso.
-- FBO de 5 color attachments criado e gerenciado estavelmente pelo OptiFine E7.
+**Registro histórico (2026-09-18, pré-hardening): PENDING REVALIDATION**
+- Este resultado antecede os gates fail-closed de cursor, rotação, semântica MCP e evidência target-specific de dimensões.
+- Não é prova atual de 19 programas, dimensões, resize ou estabilidade visual; o novo relatório só promove claims após suite completa com provenance.
 
 ### EXP-P0-CAP — capability probe versionado
 

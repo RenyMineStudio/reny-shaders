@@ -30,11 +30,12 @@ from run_p0_suite import (  # noqa: E402
     wait_for_fresh_log,
 )
 from probe_runner import (  # noqa: E402
+    evaluator_exit_code,
     evaluate_capabilities,
     mandatory_failures,
+    parse_shader_logs,
     verify_scale_bytecode,
 )
-
 PASS_COUNT = 0
 FAILURES: List[str] = []
 
@@ -248,6 +249,105 @@ def test_verified_command_no_window() -> None:
               ok is False and not evidence and err is not None,
               f"ok={ok}, err={(err or '')[:120]}")
 
+def test_xml_and_plain_logs_normalize_to_same_events() -> None:
+    plain = (
+        "[Shaders] Program loaded: final\n"
+        "[Shaders] flipped buffers after composite: 0, 3, 4\n"
+        "[Shaders] Custom uniform: reny_time\n"
+    )
+    xml = "".join(
+        f"<log4j:Message><![CDATA[{line.rstrip()}]]></log4j:Message>\n"
+        for line in plain.splitlines()
+    )
+    plain_events = parse_shader_logs(plain)
+    xml_events = parse_shader_logs(xml)
+    check("xml_plain_program_events_equal",
+          plain_events["programs_loaded"] == xml_events["programs_loaded"] == ["final"],
+          f"plain={plain_events['programs_loaded']}, xml={xml_events['programs_loaded']}")
+    check("xml_plain_flip_events_equal",
+          plain_events["ping_pong_flips"] == xml_events["ping_pong_flips"],
+          f"plain={plain_events['ping_pong_flips']}, xml={xml_events['ping_pong_flips']}")
+    check("xml_plain_uniform_events_equal",
+          plain_events["custom_uniforms"] == xml_events["custom_uniforms"] == ["reny_time"],
+          f"plain={plain_events['custom_uniforms']}, xml={xml_events['custom_uniforms']}")
+
+
+def test_world_capability_is_required_and_strict() -> None:
+    base = {
+        "pack_loaded": True, "pack_name": "X", "worlds_detected": None,
+        "block_mapping_parsed": False, "block_mapping_warnings": [],
+        "block_mapping_invalid_ids": [], "block_mapping_accepted_ids": [],
+        "custom_uniforms": [], "buffer_formats": {}, "skip_clear_buffers": [],
+        "ping_pong_flips": [], "programs_loaded": ["deferred", "composite", "final", "shadow"],
+        "programs_disabled": [], "custom_textures_loaded": [],
+        "custom_noise_loaded": False, "framebuffer_created": True,
+        "errors": [], "warnings": [],
+    }
+    missing = evaluate_capabilities(base, {}, Path("/missing.jar"), Path("/missing-instance"), None)
+    check("world_capability_missing_is_not_pass",
+          missing["world<id>"]["status"] != "PASS" and
+          missing["world<id>"]["status"] in ("FAIL", "INCONCLUSIVE"),
+          f"status={missing.get('world<id>')}")
+
+
+def test_mandatory_capabilities_happy_path_has_no_failures() -> None:
+    analysis = {
+        "pack_loaded": True, "pack_name": "X", "worlds_detected": "-1, 1",
+        "block_mapping_parsed": True,
+        "block_mapping_warnings": [],
+        "block_mapping_invalid_ids": [],
+        "block_mapping_accepted_ids": [f"block.{i}" for i in range(100, 110)],
+        "probe_mode_registration": True,
+        "probe_mode_transition_values": [0, 1],
+        "uniforms_exercised": True,
+        "custom_uniforms": [], "buffer_formats": {
+            "colortex2": "RGBA16F", "colortex4": "R11F_G11F_B10F",
+        },
+        "skip_clear_buffers": ["colortex3"],
+        "ping_pong_flips": ["flip"],
+        "world_folder_loads": ["world-1/", "world1/"],
+        "programs_loaded": [
+            "gbuffers_terrain", "gbuffers_entities", "gbuffers_water",
+            "gbuffers_hand", "gbuffers_textured", "deferred", "deferred_last",
+            "composite", "final", "shadow",
+        ],
+        "programs_disabled": [], "custom_textures_loaded": [],
+        "custom_noise_loaded": False, "framebuffer_created": True,
+        "errors": [], "warnings": [],
+    }
+    with tempfile.TemporaryDirectory() as td:
+        instance = Path(td)
+        (instance / "optionsshaders.txt").write_text("PROBE_MODE=1\n", encoding="utf-8")
+        caps = evaluate_capabilities(
+            analysis, {}, Path("/missing.jar"), instance, None,
+        )
+    failed = mandatory_failures(caps)
+    check("mandatory_happy_path_has_no_failures",
+          not failed and evaluator_exit_code(caps) == 0 and
+          all(caps[name]["status"] == "PASS"
+              for name in (
+                  "EXP-P0-STACK", "deferred", "composite", "final",
+                  "shadow", "world<id>", "profiles/options",
+                  "block.properties (vanilla)",
+                  "buffer_formats (FP16 / R11F)",
+                  "colortex_skip_clear", "frameCounter / frameTime",
+              )),
+          f"failures={failed}, exit={evaluator_exit_code(caps)}")
+
+
+def test_generic_reinit_does_not_prove_dimension_target() -> None:
+    from run_p0_suite import dimension_pattern_for
+    check("dimension_reinit_only_not_target_evidence",
+          "Reset world renderers" not in dimension_pattern_for("nether"),
+          dimension_pattern_for("nether"))
+    check("dimension_patterns_are_target_specific",
+          all(token in dimension_pattern_for(target)
+              for target, token in (("nether", "Loading dimension -1"),
+                                    ("end", "Loading dimension 1"),
+                                    ("overworld", "Loading dimension 0"))),
+          "target patterns include explicit dimension ids")
+
+
 
 def main() -> int:
     print("=== P0 HARNESS FAIL-CLOSED VERIFICATION ===\n")
@@ -260,6 +360,10 @@ def main() -> int:
     test_capability_predicates_require_specific_evidence()
     test_verified_command_no_window()
     test_mandatory_fail_exit()
+    test_xml_and_plain_logs_normalize_to_same_events()
+    test_world_capability_is_required_and_strict()
+    test_mandatory_capabilities_happy_path_has_no_failures()
+    test_generic_reinit_does_not_prove_dimension_target()
     print(f"\n{PASS_COUNT} negative controls passed, {len(FAILURES)} failed: {FAILURES}")
     return 0 if not FAILURES else 1
 

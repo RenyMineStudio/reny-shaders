@@ -28,17 +28,17 @@ Sempre separar:
 | frameCounter/frameTime | não clássico | D7+ | CONFIRMED E7 |
 | skip framebuffer clear | não | D7+, fix E7 | CONFIRMED E7 |
 | ping-pong/restore automático | não | E7 | CONFIRMED E7 mechanism |
-| deferred passes | não | E7 | CONFIRMED E7 |
-| profiles/options | não | D7+ | CONFIRMED E7 |
-| include | não | D7+ | CONFIRMED E7 |
-| block.properties | não | D7/D8+, fixes E3/E7 | CONFIRMED E7 (vanilla) |
+| deferred passes | não | E7 | HISTORICAL / PENDING REVALIDATION |
+| profiles/options | não | D7+ | HISTORICAL / PENDING REVALIDATION |
+| include | não | D7+ | HISTORICAL / PENDING REVALIDATION |
+| block.properties | não | D7/D8+, fixes E3/E7 | HISTORICAL / PENDING REVALIDATION |
 | Forge mod block mapping | não | parser aceito; cobertura modded não exercitada no P0 | UNPROVEN / INCONCLUSIVE |
-| world<id> folders | não | D7+ | CONFIRMED E7 |
+| world<id> folders | não | D7+ | HISTORICAL / PENDING REVALIDATION |
 | custom textures | não | parser D7+; assets não carregados no probe P0 | UNPROVEN / INCONCLUSIVE |
 | custom noise | não | parser E6+; texture.noise não carregado no probe P0 | UNPROVEN / INCONCLUSIVE |
-| custom uniforms | não | E7 | CONFIRMED E7 |
-| half-float formats | limitado | E3+ | CONFIRMED E7 |
-| R11F_G11F_B10F | não clássico | D7+ | CONFIRMED E7 |
+| custom uniforms | não | E7 | HISTORICAL / PENDING REVALIDATION |
+| half-float formats | limitado | E3+ | HISTORICAL / PENDING REVALIDATION |
+| R11F_G11F_B10F | não clássico | D7+ | HISTORICAL / PENDING REVALIDATION |
 | relative size.buffer | não | não provado; histórico moderno | DO NOT ASSUME |
 | scale.<program> | não | ausente no bytecode E7; commit 2018 é posterior | REJECTED E7 |
 | object motion vectors | não | não | FAILED |
@@ -64,19 +64,23 @@ Proveniência exata (tested tree SHA, gates e delta allowlisted) em
 ### Preflight semântico MCP
 
 O repositório possui integração project-local com o `minecraft-dev-toolkit` em
-`opencode.json` e `.opencode/plugins/minecraft-mcp-guard.js`. Ela é uma
-pré-condição semântica para automação de pixel quando o bridge Forge estiver
-disponível:
+`opencode.json` e `.opencode/plugins/minecraft-mcp-guard.js`. No preflight
+real de 2026-09-22, o bridge Forge standalone foi carregado no cliente e o
+transporte MCP respondeu:
 
-- `minecraft_ping`, `minecraft_get_runtime_info`,
-  `minecraft_get_player_state` e `minecraft_get_client_state` são evidência
-  de estado do runtime, não evidência visual do shader.
-- `minecraft_get_capabilities` e `tools/list` apenas descobrem a superfície;
-  nunca promovem uma capability a PASS.
-- screenshots, logs e execução do `run_p0_suite.py` continuam obrigatórios
-  para claims visuais/GPU.
-- bridge ausente deve aparecer explicitamente como `ECONNREFUSED` /
-  `INCONCLUSIVE`; não é sucesso semântico.
+- `minecraft_ping` → `{"ok":true}`;
+- `minecraft_get_capabilities` → superfície core completa;
+- `minecraft_get_client_state` → snapshot estruturado;
+- `minecraft_get_runtime_info` e `minecraft_get_player_state` → sem
+  `ECONNREFUSED`.
+
+Isso prova somente o canal semântico e não promove capability visual a PASS.
+Screenshots, logs e execução de `run_p0_suite.py` continuam obrigatórios para
+claims visuais/GPU. O fallback de ação GUI permanece bloqueado por
+`CAPABILITY_UNAVAILABLE`; a lacuna foi reportada em
+https://github.com/RenyMineStudio/minecraft-dev-toolkit/issues/16.
+
+> **Proveniência:** os itens de execução abaixo são registro histórico pré-hardening e permanecem **PENDING REVALIDATION** até um relatório gerado pela suite completa com tree SHA, bridge MCP e gates target-specific. Não promovê-los a CONFIRMED no PR atual.
 
 - **Pipeline base:** 19 programas GLSL 1.20 compilaram e executaram sem erros OpenGL ou GLSL (`gbuffers_*`, `deferred`, `composite`, `final`, `shadow`).
 - **Deferred stage:** confirmado funcional entre terrain e water. `deferred.fsh` comunica com `composite` via `colortex4` com flip automático de ping-pong (`flipped buffers after deferred: 0, 4`) e restauração por `deferred_last`.
