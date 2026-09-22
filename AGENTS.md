@@ -223,6 +223,14 @@ Ausência de licença = não assumir permissão.
 
 Prefira reimplementar princípios gerais de forma própria.
 
+## Minecraft Dev Toolkit e clientes agentivos
+
+Quando uma tarefa depender do shared `minecraft-dev`, trate OpenCode V2 e OMP como clientes independentes. O repo deve versionar ambos os formatos project-local no mesmo slice de integração: `opencode.json` com `mcp.servers.minecraft-dev` e `.omp/mcp.json` com `mcpServers.minecraft-dev`.
+
+Nunca assuma que OMP autodiscovery do arquivo OpenCode substitui a configuração OMP-native. Ambos devem apontar para o mesmo servidor/launcher lógico e nenhum deles pode exigir configuração global ou path absoluto versionado.
+
+O guard `.opencode/plugins/minecraft-mcp-guard.js` é OpenCode-specific. Uma sessão OMP com o mesmo MCP deve seguir semantic-first por contrato, mas não pode alegar paridade fail-closed até existir enforcement OMP-native provado.
+
 ## Gates de entrega
 
 Quando aplicável, uma mudança só pode ser considerada concluída depois de:
