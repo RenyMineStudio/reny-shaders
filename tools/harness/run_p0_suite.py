@@ -120,6 +120,7 @@ class LogCursor:
     path: Path
     inode: Optional[int] = None
     size: int = 0
+    prefix_sha256: Optional[str] = None
     captured_at: float = 0.0
     error: Optional[str] = None
 
@@ -130,11 +131,14 @@ class LogCursor:
             st = path.stat()
             cur.inode = st.st_ino
             cur.size = st.st_size
+            with path.open("rb") as f:
+                cur.prefix_sha256 = hashlib.sha256(f.read(min(st.st_size, 4096))).hexdigest()
         except FileNotFoundError:
             cur.error = f"log file not found at capture: {path}"
         except OSError as exc:
             cur.error = f"log stat failed at capture: {exc}"
         return cur
+
 
 
 @dataclass
@@ -143,8 +147,8 @@ class FreshLogRead:
     truncated_or_rotated: bool = False
     error: Optional[str] = None
 
-
 def read_fresh_log(cursor: LogCursor) -> FreshLogRead:
+
     """Read only bytes appended after cursor; handle rotation/truncation explicitly."""
     try:
         st = cursor.path.stat()
@@ -156,18 +160,22 @@ def read_fresh_log(cursor: LogCursor) -> FreshLogRead:
     truncated_or_rotated = False
     start_offset = cursor.size
     if cursor.inode is not None and st.st_ino != cursor.inode:
-        # File rotated/recreated: everything present is new evidence.
+        # File rotated/recreated: the cursor is invalid, never trust its bytes.
         truncated_or_rotated = True
         start_offset = 0
     elif st.st_size < cursor.size:
-        # Truncated in place (log rotation): everything present is new evidence.
+        # Truncated in place: the cursor is invalid, never trust its bytes.
         truncated_or_rotated = True
         start_offset = 0
 
     try:
         with cursor.path.open("rb") as f:
-            f.seek(start_offset)
-            raw = f.read()
+            raw_all = f.read()
+        current_prefix = hashlib.sha256(raw_all[: min(cursor.size, 4096)]).hexdigest()
+        if cursor.prefix_sha256 is not None and current_prefix != cursor.prefix_sha256:
+            truncated_or_rotated = True
+            start_offset = 0
+        raw = raw_all[start_offset:]
         text = raw.decode("utf-8", errors="replace")
         return FreshLogRead(lines=text, truncated_or_rotated=truncated_or_rotated)
     except OSError as exc:
@@ -188,46 +196,35 @@ def wait_for_fresh_log(
     timeout: float = 30.0,
     poll_interval: float = 0.5,
 ) -> LogWaitResult:
-    """
-    Wait for `pattern` in log content appended AFTER cursor.
-    Stale occurrences from earlier in the session never satisfy the wait.
-    """
+    """Wait only for trustworthy bytes appended after the cursor."""
     if cursor.error is not None:
-        return LogWaitResult(
-            matched=False,
-            evidence="",
-            error=f"cursor capture failed, cannot trust wait: {cursor.error}",
-        )
+        return LogWaitResult(False, error=f"cursor capture failed, cannot trust wait: {cursor.error}")
     try:
         regex = re.compile(pattern)
     except re.error as exc:
-        return LogWaitResult(matched=False, evidence="", error=f"invalid regex {pattern!r}: {exc}")
-
+        return LogWaitResult(False, error=f"invalid regex {pattern!r}: {exc}")
     deadline = time.time() + timeout
     last_error: Optional[str] = None
-    saw_rotation = False
     while time.time() < deadline:
         fresh = read_fresh_log(cursor)
         if fresh.error is not None:
             last_error = fresh.error
-            time.sleep(poll_interval)
-            continue
-        if fresh.truncated_or_rotated:
-            saw_rotation = True
-        m = regex.search(fresh.lines)
-        if m:
-            context = m.group(0)[:220]
+        elif fresh.truncated_or_rotated:
             return LogWaitResult(
-                matched=True,
-                evidence=f"fresh match after cursor: {context!r}",
-                truncated_or_rotated=saw_rotation,
+                False,
+                evidence="log rotated or truncated after cursor; fresh evidence is not trustworthy",
+                error="log rotation/truncation invalidated the evidence cursor",
+                truncated_or_rotated=True,
             )
+        else:
+            match = regex.search(fresh.lines)
+            if match:
+                return LogWaitResult(True, evidence=f"fresh match after cursor: {match.group(0)[:220]!r}")
         time.sleep(poll_interval)
     return LogWaitResult(
-        matched=False,
-        evidence=f"no fresh match for {pattern!r} within {timeout}s (rotation seen: {saw_rotation})",
+        False,
+        evidence=f"no fresh match for {pattern!r} within {timeout}s",
         error=last_error or f"timeout waiting for fresh log pattern {pattern!r}",
-        truncated_or_rotated=saw_rotation,
     )
 
 
@@ -282,29 +279,26 @@ def wait_for_fresh_combined(
 
     deadline = time.time() + timeout
     last_error: Optional[str] = None
-    saw_rotation = False
     while time.time() < deadline:
         fresh = read_fresh_combined(cursors)
         if fresh.error is not None:
             last_error = fresh.error
-            time.sleep(poll_interval)
-            continue
-        if fresh.truncated_or_rotated:
-            saw_rotation = True
-        m = regex.search(fresh.lines)
-        if m:
-            context = m.group(0)[:220]
+        elif fresh.truncated_or_rotated:
             return LogWaitResult(
-                matched=True,
-                evidence=f"fresh match after cursor: {context!r}",
-                truncated_or_rotated=saw_rotation,
+                False,
+                evidence="one or more logs rotated or truncated after cursor; evidence is not trustworthy",
+                error="log rotation/truncation invalidated the evidence cursors",
+                truncated_or_rotated=True,
             )
+        else:
+            match = regex.search(fresh.lines)
+            if match:
+                return LogWaitResult(True, evidence=f"fresh match after cursor: {match.group(0)[:220]!r}")
         time.sleep(poll_interval)
     return LogWaitResult(
-        matched=False,
-        evidence=f"no fresh match for {pattern!r} within {timeout}s (rotation seen: {saw_rotation})",
+        False,
+        evidence=f"no fresh match for {pattern!r} within {timeout}s",
         error=last_error or f"timeout waiting for fresh log pattern {pattern!r}",
-        truncated_or_rotated=saw_rotation,
     )
 
 

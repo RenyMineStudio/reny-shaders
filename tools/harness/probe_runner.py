@@ -252,8 +252,12 @@ def parse_shader_logs(log_text: str) -> Dict[str, Any]:
         "pack_name": None,
         "worlds_detected": None,
         "block_mapping_parsed": False,
+        "block_mapping_accepted_ids": [],
         "block_mapping_warnings": [],
         "block_mapping_invalid_ids": [],
+        "probe_mode_registration": False,
+        "probe_mode_transition_values": [],
+        "uniforms_exercised": False,
         "custom_uniforms": [],
         "buffer_formats": {},
         "skip_clear_buffers": [],
@@ -301,6 +305,14 @@ def parse_shader_logs(log_text: str) -> Dict[str, Any]:
         elif "[Shaders] Program disabled:" in line:
             prog = line.split("Program disabled:", 1)[1].strip()
             results["programs_disabled"].append(prog)
+        elif re.search(r"PROBE_MODE\s*(?:registered|option|profile)", line, re.IGNORECASE):
+            results["probe_mode_registration"] = True
+        elif re.search(r"PROBE_MODE\s*(?:changed|set|persisted)\s*[:=]\s*(\d+)", line, re.IGNORECASE):
+            results["probe_mode_transition_values"].append(int(re.search(r"(\d+)", line).group(1)))
+        elif re.search(r"(?:uniforms?|HUD).*(?:frameCounter|frameTime).*(?:exercised|heartbeat|updated)", line, re.IGNORECASE):
+            results["uniforms_exercised"] = True
+        elif re.search(r"(?:accepted|mapped).*(?:block\.(?:10[0-9]))", line, re.IGNORECASE):
+            results["block_mapping_accepted_ids"].append(re.search(r"(block\.10[0-9])", line, re.IGNORECASE).group(1))
         elif "[Shaders] Framebuffer created." in line:
             results["framebuffer_created"] = True
         elif "[Shaders] Loading custom texture:" in line:
@@ -443,34 +455,26 @@ def evaluate_capabilities(
         "evidence": i_ev, "notes": "Depth-10 nesting is parser documentation, not measured here",
     }
 
-    # 7. world<id>
-    worlds = log_analysis.get("worlds_detected")
-    if worlds and ("-1" in worlds or "1" in worlds):
-        w_st, w_ev = "PASS", f"OptiFine scanned and registered Worlds: {worlds}"
-    else:
-        w_st, w_ev = "INCONCLUSIVE", "Worlds log line absent or empty; folder selection unproven"
-    capabilities["world<id>"] = {
-        "status": w_st, "description": "Per-dimension shader folder overrides (world-1, world1)",
-        "evidence": w_ev,
-        "notes": "Dimension-gate evidence (fresh Loading dimension lines) lives in the suite manifest",
-    }
-
-    # 8. profiles/options: STRICT — requires persisted PROBE_MODE evidence.
+    # 8. profiles/options: require registration plus an observed transition
+    # and persisted target value; current-file presence alone is insufficient.
     props_file = SHADERS_DIR / "shaders.properties"
     probe_val, probe_msg = read_probe_mode_from_options(instance_dir)
-    if props_file.is_file() and pack_loaded and not has_errors and probe_val is not None:
-        p_st, p_ev = "PASS", f"shaders.properties present, pack loaded clean, and {probe_msg}"
+    transitions = log_analysis.get("probe_mode_transition_values", [])
+    mode_specific = (
+        props_file.is_file()
+        and log_analysis.get("probe_mode_registration", False)
+        and len(transitions) >= 2
+        and probe_val is not None
+        and probe_val in transitions
+    )
+    if mode_specific and pack_loaded and not has_errors:
+        p_st, p_ev = "PASS", f"PROBE_MODE registered, changed through {transitions}, and {probe_msg}"
     else:
-        reasons = []
-        if not props_file.is_file():
-            reasons.append("shaders.properties absent in repo")
-        if not pack_loaded:
-            reasons.append("pack load unobserved")
-        if has_errors:
-            reasons.append(f"{len(errors)} errors observed")
-        if probe_val is None:
-            reasons.append(probe_msg)
-        p_st, p_ev = "INCONCLUSIVE", "profiles/options unproven: " + "; ".join(reasons)
+        p_st, p_ev = "INCONCLUSIVE", (
+            "profiles/options unproven: requires registration, at least two observed "
+            f"mode values, and persisted value; registration={log_analysis.get('probe_mode_registration')}, "
+            f"transitions={transitions}, persisted={probe_msg}"
+        )
     capabilities["profiles/options"] = {
         "status": p_st,
         "description": "Profile declarations and PROBE_MODE option registration/persistence",
@@ -478,32 +482,30 @@ def evaluate_capabilities(
         "notes": "Mode-cycle persistence is additionally evidenced by suite mode_change gates",
     }
 
-    # 9. block.properties (vanilla): parser line + zero invalid warnings for 100-109.
+    # 9. block.properties (vanilla): every expected ID must be observed accepted.
     invalid_ids = set(log_analysis.get("block_mapping_invalid_ids", []))
     vanilla_ids = {f"block.{i}" for i in range(100, 110)}
     vanilla_rejected = sorted(vanilla_ids & invalid_ids)
+    vanilla_accepted = set(log_analysis.get("block_mapping_accepted_ids", []))
     props_src = SHADERS_DIR / "block.properties"
     try:
         props_text = props_src.read_text(encoding="utf-8", errors="replace") if props_src.is_file() else ""
-    except OSError:
+    except OSError as exc:
         props_text = ""
+        read_error = str(exc)
+    else:
+        read_error = None
     vanilla_declared = all(f"block.{i}=" in props_text for i in range(100, 110))
-    if log_analysis.get("block_mapping_parsed") and vanilla_declared and not vanilla_rejected:
-        b_st, b_ev = "PASS", (
-            "Log shows 'Parsing block mappings'; repo declares block.100-109 "
-            "and no 'Invalid block ID mapping' warning names any block.100-109"
-        )
-    elif log_analysis.get("block_mapping_parsed") and vanilla_rejected:
+    missing_accepted = sorted(vanilla_ids - vanilla_accepted)
+    if vanilla_declared and not vanilla_rejected and not missing_accepted:
+        b_st, b_ev = "PASS", f"Parser accepted vanilla mappings: {sorted(vanilla_accepted)}"
+    elif vanilla_rejected:
         b_st, b_ev = "FAIL", f"Vanilla mappings rejected by parser: {vanilla_rejected}"
     else:
-        missing = []
-        if not log_analysis.get("block_mapping_parsed"):
-            missing.append("parse line unobserved")
-        if not vanilla_declared:
-            missing.append("block.100-109 declarations absent in repo")
-        if vanilla_rejected:
-            missing.append(f"rejected: {vanilla_rejected}")
-        b_st, b_ev = "INCONCLUSIVE", "Vanilla mapping unproven: " + "; ".join(missing)
+        b_st, b_ev = "INCONCLUSIVE", (
+            "Vanilla mapping unproven: parser acceptance for expected IDs missing"
+            f" ({missing_accepted}); source_error={read_error}"
+        )
     capabilities["block.properties (vanilla)"] = {
         "status": b_st,
         "description": "Vanilla block ID alias mapping accepted without rejection",
@@ -561,21 +563,14 @@ def evaluate_capabilities(
         "status": sk_st, "description": "Skip framebuffer clear on colortex3 (colortex3Clear = false)",
         "evidence": sk_ev, "notes": "Temporal persistence across frames is evidenced by Mode 2 captures in the manifest",
     }
-
-    # 14. frameCounter / frameTime: STRICT — source refs + clean compile + Mode 1 capture.
+    # 14. frameCounter / frameTime: source references are not exercise evidence.
     refs = _glsl_references(["frameCounter", "frameTime"])
     mode1_path = (screenshot_dir / "exp_p0_cap_mode1_uniforms_hud.png") if screenshot_dir else None
-    mode1_ok, mode1_msg = False, "Mode 1 capture not checked (no screenshot dir)"
-    if mode1_path is not None:
-        try:
-            if mode1_path.is_file() and mode1_path.stat().st_size > 0:
-                mode1_ok, mode1_msg = True, f"Mode 1 capture present ({mode1_path.stat().st_size} bytes)"
-            else:
-                mode1_msg = f"Mode 1 capture missing or empty: {mode1_path}"
-        except OSError as exc:
-            mode1_msg = f"Mode 1 capture stat failed: {exc}"
+    mode1_ok, mode1_msg = False, "Mode 1 uniform exercise not observed"
+    if log_analysis.get("uniforms_exercised"):
+        mode1_ok, mode1_msg = True, "runtime log explicitly records uniform exercise"
     if pack_loaded and not has_errors and refs.get("frameCounter") and refs.get("frameTime") and mode1_ok:
-        fc_st, fc_ev = "PASS", (f"final.fsh/composite.fsh reference frameCounter and frameTime, compiled clean, and {mode1_msg}")
+        fc_st, fc_ev = "PASS", f"shader references and {mode1_msg}"
     else:
         parts = []
         if not pack_loaded:
@@ -586,8 +581,7 @@ def evaluate_capabilities(
             parts.append("frameCounter unreferenced in shader sources")
         if not refs.get("frameTime"):
             parts.append("frameTime unreferenced in shader sources")
-        if not mode1_ok:
-            parts.append(mode1_msg)
+        parts.append(mode1_msg)
         fc_st, fc_ev = "INCONCLUSIVE", "Uniform exercise unproven: " + "; ".join(parts)
     capabilities["frameCounter / frameTime"] = {
         "status": fc_st, "description": "Built-in frame counter and frame delta time uniforms exercised",

@@ -61,6 +61,23 @@ Proveniência exata (tested tree SHA, gates e delta allowlisted) em
 `benchmarks/reports/p0_probe_report.json` / `.md` e
 `benchmarks/artifacts/p0_probe/MANIFEST.md`.
 
+### Preflight semântico MCP
+
+O repositório possui integração project-local com o `minecraft-dev-toolkit` em
+`opencode.json` e `.opencode/plugins/minecraft-mcp-guard.js`. Ela é uma
+pré-condição semântica para automação de pixel quando o bridge Forge estiver
+disponível:
+
+- `minecraft_ping`, `minecraft_get_runtime_info`,
+  `minecraft_get_player_state` e `minecraft_get_client_state` são evidência
+  de estado do runtime, não evidência visual do shader.
+- `minecraft_get_capabilities` e `tools/list` apenas descobrem a superfície;
+  nunca promovem uma capability a PASS.
+- screenshots, logs e execução do `run_p0_suite.py` continuam obrigatórios
+  para claims visuais/GPU.
+- bridge ausente deve aparecer explicitamente como `ECONNREFUSED` /
+  `INCONCLUSIVE`; não é sucesso semântico.
+
 - **Pipeline base:** 19 programas GLSL 1.20 compilaram e executaram sem erros OpenGL ou GLSL (`gbuffers_*`, `deferred`, `composite`, `final`, `shadow`).
 - **Deferred stage:** confirmado funcional entre terrain e water. `deferred.fsh` comunica com `composite` via `colortex4` com flip automático de ping-pong (`flipped buffers after deferred: 0, 4`) e restauração por `deferred_last`.
 - **Skip-clear & history (`colortex3Clear = false`):** confirmado. OptiFine registrou `colortex3 clear disabled` e o probe demonstrou persistência temporal visual estável de 25–30 frames.
@@ -74,10 +91,10 @@ Proveniência exata (tested tree SHA, gates e delta allowlisted) em
 - **Profiles & Options:** `shaders.properties` e opções declaradas em comentários (`#define PROBE_MODE ... // [0 1 2 3 4 5]`) geram telas de menu interativas com nomes e tooltips de `en_US.lang`, e persistem em `optionsshaders.txt`.
 - **Reload path (observado):** F3+T recarrega texturas/recursos mas NÃO recria o framebuffer de shaders no E7; o reload de shaderpack acontece via Done na tela Shaders (recriação de framebuffer + `Reset world renderers` observados no log).
 - **Option write semantics (observado):** editar `optionsshaders.txt` (arquivo runtime, fora do Git) e em seguida confirmar Done na tela Shaders NÃO aplica o valor — o OptiFine descarrega o estado in-memory da GUI sobre o arquivo. Mudanças de `PROBE_MODE` precisam passar pelo botão da tela Shader Options; o arquivo serve para leitura/verificação de persistência, não como via de escrita pré-reload.
-- **Uniforms dinâmicos:** `frameCounter`, `frameTime`, `frameTimeCounter`, `worldTime` e `sunPosition` validados em tempo real via HUD de diagnóstico.
+  - **Profiles & Options:** a execução visual histórica mostrou telas e persistência de `PROBE_MODE`; o evaluator atual só marca PASS quando registra transições específicas e confirmação em `optionsshaders.txt`.
 - **GLSL 1.20 legacy:** operador de módulo inteiro `%` é reservado em 1.20 e deve usar `mod(float, float)`. Formatos em `composite.fsh` devem ser declarados dentro de comentários para leitura pelo `ShaderPackParser` sem violar a gramática do compilador GLSL.
 
-### Material mapping existe no E7
+  - **Uniforms dinâmicos:** a execução visual histórica mostrou HUD; o evaluator atual só marca PASS com marcador runtime explícito de exercício de `frameCounter`/`frameTime`.
 
 Block-ID mapping, block.properties e Forge mod block mapping estão presentes no stack tardio.
 

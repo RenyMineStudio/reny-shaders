@@ -156,6 +156,54 @@ def test_scale_tristate() -> None:
               f"outcome={v2.outcome}: {v2.message}")
     finally:
         bad.unlink(missing_ok=True)
+def test_rotation_is_not_accepted_as_fresh_evidence() -> None:
+    """Rotation cannot make pre-action lines trustworthy."""
+    with tempfile.NamedTemporaryFile("w+", suffix=".log", delete=False) as f:
+        f.write("Loading dimension -1 (old session evidence)\n")
+        f.flush()
+        log_path = Path(f.name)
+    try:
+        cursor = LogCursor.capture(log_path)
+        log_path.unlink()
+        log_path.write_text("Loading dimension -1 (rotated old evidence)\n", encoding="utf-8")
+        wait = wait_for_fresh_log(cursor, r"Loading dimension -1", timeout=1.0)
+        check("rotated_stale_log_rejected",
+              wait.matched is False and wait.truncated_or_rotated,
+              f"matched={wait.matched}, rotated={wait.truncated_or_rotated}, error={wait.error}")
+    finally:
+        log_path.unlink(missing_ok=True)
+
+
+def test_capability_predicates_require_specific_evidence() -> None:
+    """Parser/source presence alone must not promote runtime claims."""
+    log_analysis = {
+        "pack_loaded": True, "pack_name": "X", "worlds_detected": "-1, 1",
+        "block_mapping_parsed": True, "block_mapping_warnings": [],
+        "block_mapping_invalid_ids": [], "block_mapping_accepted_ids": [],
+        "custom_uniforms": [], "buffer_formats": {}, "skip_clear_buffers": [],
+        "ping_pong_flips": [], "programs_loaded": ["final"],
+        "programs_disabled": [], "custom_textures_loaded": [],
+        "custom_noise_loaded": False, "framebuffer_created": True,
+        "errors": [], "warnings": [],
+    }
+    with tempfile.TemporaryDirectory() as td:
+        instance = Path(td)
+        (instance / "optionsshaders.txt").write_text("PROBE_MODE=1\n", encoding="utf-8")
+        shots = instance / "shots"
+        shots.mkdir()
+        (shots / "exp_p0_cap_mode1_uniforms_hud.png").write_bytes(b"not visual evidence")
+        caps = evaluate_capabilities(
+            log_analysis, {}, Path(td) / "missing.jar", instance, shots,
+        )
+    check("profiles_require_mode_transition",
+          caps["profiles/options"]["status"] == "INCONCLUSIVE",
+          caps["profiles/options"]["evidence"])
+    check("vanilla_mapping_requires_acceptance",
+          caps["block.properties (vanilla)"]["status"] == "INCONCLUSIVE",
+          caps["block.properties (vanilla)"]["evidence"])
+    check("uniforms_require_exercised_evidence",
+          caps["frameCounter / frameTime"]["status"] == "INCONCLUSIVE",
+          caps["frameCounter / frameTime"]["evidence"])
 
 
 def test_mandatory_fail_exit() -> None:
@@ -207,7 +255,9 @@ def main() -> int:
     test_screenshot_failure()
     test_log_read_failure()
     test_stale_log_match()
+    test_rotation_is_not_accepted_as_fresh_evidence()
     test_scale_tristate()
+    test_capability_predicates_require_specific_evidence()
     test_verified_command_no_window()
     test_mandatory_fail_exit()
     print(f"\n{PASS_COUNT} negative controls passed, {len(FAILURES)} failed: {FAILURES}")
