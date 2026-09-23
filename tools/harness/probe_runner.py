@@ -273,6 +273,8 @@ def parse_shader_logs(log_text: str) -> Dict[str, Any]:
         "block_mapping_warnings": [],
         "block_mapping_invalid_ids": [],
         "probe_mode_registration": False,
+        "probe_mode_transition_values": [],
+        "dimension_events": [],
         "world_folder_loads": [],
         "uniforms_exercised": False,
         "custom_uniforms": [],
@@ -297,10 +299,22 @@ def parse_shader_logs(log_text: str) -> Dict[str, Any]:
             results["pack_name"] = line.split("Loading shader pack:", 1)[1].strip()
         elif "[Shaders] Worlds:" in line:
             results["worlds_detected"] = line.split("Worlds:", 1)[1].strip()
-        elif re.search(r"(?:Loading dimension|Program loaded:)\s*-1|world-1/", line, re.IGNORECASE):
-            results["world_folder_loads"].append("world-1/")
-        elif re.search(r"(?:Loading dimension|Program loaded:)\s*1|world1/", line, re.IGNORECASE):
-            results["world_folder_loads"].append("world1/")
+        elif m_dim := re.search(r"Loading dimension\s*(-?\d+)", line):
+            # Dimension lifecycle is NOT shader-folder evidence: the integrated
+            # server emits these lines at startup for every dimension, so they
+            # can never promote world<id> on their own. Recorded separately.
+            try:
+                _append_unique(results["dimension_events"], int(m_dim.group(1)))
+            except ValueError:
+                pass
+        elif re.search(r"Program loaded:\s*world-1/", line):
+            # Shader-loader-specific folder evidence: OptiFine resolved a
+            # program from the world-1/ (Nether) override directory.
+            _append_unique(results["world_folder_loads"], "world-1/")
+        elif re.search(r"Program loaded:\s*world1/", line):
+            # Shader-loader-specific folder evidence: OptiFine resolved a
+            # program from the world1/ (End) override directory.
+            _append_unique(results["world_folder_loads"], "world1/")
         elif "Parsing block mappings:" in line:
             results["block_mapping_parsed"] = True
         elif "[Shaders] Invalid block ID mapping:" in line or "Block not found for name:" in line:
@@ -329,8 +343,8 @@ def parse_shader_logs(log_text: str) -> Dict[str, Any]:
             results["programs_disabled"].append(prog)
         elif re.search(r"PROBE_MODE\s*(?:registered|option|profile)", line, re.IGNORECASE):
             results["probe_mode_registration"] = True
-        elif re.search(r"PROBE_MODE\s*(?:changed|set|persisted)\s*[:=]\s*(\d+)", line, re.IGNORECASE):
-            results["probe_mode_transition_values"].append(int(re.search(r"(\d+)", line).group(1)))
+        elif m_probe := re.search(r"PROBE_MODE\s*(?:changed|set|persisted)\s*[:=]\s*(\d+)", line, re.IGNORECASE):
+            results["probe_mode_transition_values"].append(int(m_probe.group(1)))
         elif re.search(r"(?:uniforms?|HUD).*(?:frameCounter|frameTime).*(?:exercised|heartbeat|updated)", line, re.IGNORECASE):
             results["uniforms_exercised"] = True
         elif re.search(r"(?:accepted|mapped).*(?:block\.(?:10[0-9]))", line, re.IGNORECASE):

@@ -320,9 +320,28 @@ DIM_SWITCH_FRESH_PATTERN = (
 
 
 def dimension_pattern_for(target: str) -> str:
-    """Return only target-specific evidence for a fresh dimension transition."""
+    """Return only target-specific evidence for a fresh dimension transition.
+
+    Provenance (client_stdout.log, 2026-09-23 session on this stack):
+    - Nether/End entry: `[Shaders] Uninit` followed by
+      `Program loaded: world-1/...` (Nether) or `Program loaded: world1/...`
+      (End) override programs, then `Framebuffer created` + `Reset world renderers`.
+    - Overworld return: `[Shaders] Uninit` followed by pack-ROOT program loads
+      (`Program loaded: gbuffers_*` with no world prefix), e.g. the 16:28:59
+      'Block placed' portal action that reloaded the full root set and
+      `Framebuffer created` + `Reset world renderers`.
+    The Overworld uses the pack root, never a `world0/` directory, so `world0/`
+    must not appear here. Generic `Reset world renderers` / `Framebuffer created`
+    lines alone match no target pattern: they also fire on GUI reload/resize.
+    `Loading dimension <id>` lines are startup-only on the integrated server and
+    can never satisfy a fresh post-action wait on their own; they are kept as a
+    harmless extra so a stale LINE can never be confused with fresh evidence.
+    No semantic dimension field exists in the MDT Forge bridge
+    (ClientSnapshot/player/runtime expose ready/screen/pos, no dimension), so
+    log matching on these loader-specific markers is the selected mechanism.
+    """
     patterns = {
-        "overworld": r"Loading dimension 0|Program loaded: world0/|world0/",
+        "overworld": r"Loading dimension 0|Program loaded: gbuffers_",
         "nether": r"Loading dimension -1|Program loaded: world-1/|world-1/",
         "end": r"Loading dimension 1|Program loaded: world1/|world1/",
     }

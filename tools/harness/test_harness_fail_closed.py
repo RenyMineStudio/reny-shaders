@@ -348,6 +348,108 @@ def test_generic_reinit_does_not_prove_dimension_target() -> None:
           "target patterns include explicit dimension ids")
 
 
+def test_probe_mode_parser_handles_real_lines() -> None:
+    """Real PROBE_MODE evidence through parse_shader_logs must not raise."""
+    log = "PROBE_MODE registered\nPROBE_MODE changed: 1\n"
+    try:
+        events = parse_shader_logs(log)
+    except Exception as exc:  # noqa: BLE001
+        check("probe_mode_parser_no_keyerror", False, f"raised {type(exc).__name__}: {exc}")
+        return
+    check("probe_mode_parser_no_keyerror", True, "parse_shader_logs returned without exception")
+    check("probe_mode_parser_registration",
+          events.get("probe_mode_registration") is True,
+          f"registration={events.get('probe_mode_registration')}")
+    check("probe_mode_parser_transition_values",
+          events.get("probe_mode_transition_values") == [1],
+          f"transitions={events.get('probe_mode_transition_values')}")
+
+
+def test_probe_mode_parser_bounded_transitions() -> None:
+    """Bounded 0 -> 1 -> 2 transition sequence must be recorded in order."""
+    log = "PROBE_MODE changed: 0\nPROBE_MODE changed: 1\nPROBE_MODE changed: 2\n"
+    try:
+        events = parse_shader_logs(log)
+    except Exception as exc:  # noqa: BLE001
+        check("probe_mode_parser_bounded_no_keyerror", False, f"raised {type(exc).__name__}: {exc}")
+        return
+    check("probe_mode_parser_bounded_no_keyerror", True, "parse_shader_logs returned without exception")
+    check("probe_mode_parser_bounded_values",
+          events.get("probe_mode_transition_values") == [0, 1, 2],
+          f"transitions={events.get('probe_mode_transition_values')}")
+
+
+def test_dimension_events_separated_from_world_folder_loads() -> None:
+    """'Loading dimension' lines are dimension events, never shader-folder evidence."""
+    log = "[Server thread/INFO]: Loading dimension -1\n[Server thread/INFO]: Loading dimension 1\n"
+    events = parse_shader_logs(log)
+    check("dimension_events_recorded",
+          events.get("dimension_events") == [-1, 1],
+          f"dimension_events={events.get('dimension_events')}")
+    check("dimension_lines_not_folder_loads",
+          events.get("world_folder_loads") == [],
+          f"world_folder_loads={events.get('world_folder_loads')}")
+
+
+def test_world_capability_negative_control() -> None:
+    """Dimension lines without shader-folder evidence must never PASS world<id>."""
+    log = ("[Shaders] Loaded shaderpack: Reny-Capability-Probe\n"
+           "[Server thread/INFO]: Loading dimension -1\n"
+           "[Server thread/INFO]: Loading dimension 1\n")
+    events = parse_shader_logs(log)
+    caps = evaluate_capabilities(
+        events, {}, Path("/tmp/opencode/reny-p0-no-such-optifine.jar"),
+        Path("/tmp/opencode/reny-p0-no-instance"), None,
+    )
+    status = caps["world<id>"]["status"]
+    check("world_capability_negative_control",
+          status != "PASS" and status in ("FAIL", "INCONCLUSIVE"),
+          f"status={status}: {caps['world<id>']['evidence']}")
+
+
+def test_world_capability_positive_control() -> None:
+    """Shader-loader folder evidence (Program loaded: world-1/ + world1/) may PASS world<id>."""
+    log = ("[Shaders] Loaded shaderpack: Reny-Capability-Probe\n"
+           "[Shaders] Program loaded: world-1/gbuffers_textured\n"
+           "[Shaders] Program loaded: world1/gbuffers_textured\n")
+    events = parse_shader_logs(log)
+    check("world_folder_loads_positive_evidence",
+          set(events.get("world_folder_loads", [])) == {"world-1/", "world1/"},
+          f"world_folder_loads={events.get('world_folder_loads')}")
+    caps = evaluate_capabilities(
+        events, {}, Path("/tmp/opencode/reny-p0-no-such-optifine.jar"),
+        Path("/tmp/opencode/reny-p0-no-instance"), None,
+    )
+    check("world_capability_positive_control",
+          caps["world<id>"]["status"] == "PASS",
+          f"status={caps['world<id>']['status']}: {caps['world<id>']['evidence']}")
+
+
+def test_overworld_pattern_uses_target_specific_marker() -> None:
+    """Overworld return must use the pack-root reload marker, never world0/."""
+    import re
+    from run_p0_suite import dimension_pattern_for
+    pattern = dimension_pattern_for("overworld")
+    check("overworld_pattern_has_no_world0",
+          "world0" not in pattern,
+          f"pattern={pattern!r}")
+    # Real observed return-to-Overworld signature (2026-09-23 client_stdout.log,
+    # 16:28:59 'Block placed' -> Uninit -> pack-root gbuffers reload):
+    # the End/Nether folders use world1//world-1/ prefixes, the Overworld uses
+    # the pack root, so a bare 'Program loaded: gbuffers_*' line is the marker.
+    root_reload = ("[Shaders] Uninit\n"
+                   "[Shaders] Program loaded: gbuffers_basic\n"
+                   "[Shaders] Program loaded: gbuffers_textured\n")
+    check("overworld_pattern_matches_root_reload",
+          re.search(pattern, root_reload) is not None,
+          f"pattern={pattern!r}")
+    generic_reinit = ("[Shaders] Reset world renderers\n"
+                      "[Shaders] Framebuffer created.\n")
+    check("overworld_pattern_rejects_generic_reinit",
+          re.search(pattern, generic_reinit) is None,
+          f"pattern={pattern!r}")
+
+
 
 def main() -> int:
     print("=== P0 HARNESS FAIL-CLOSED VERIFICATION ===\n")
@@ -364,6 +466,12 @@ def main() -> int:
     test_world_capability_is_required_and_strict()
     test_mandatory_capabilities_happy_path_has_no_failures()
     test_generic_reinit_does_not_prove_dimension_target()
+    test_probe_mode_parser_handles_real_lines()
+    test_probe_mode_parser_bounded_transitions()
+    test_dimension_events_separated_from_world_folder_loads()
+    test_world_capability_negative_control()
+    test_world_capability_positive_control()
+    test_overworld_pattern_uses_target_specific_marker()
     print(f"\n{PASS_COUNT} negative controls passed, {len(FAILURES)} failed: {FAILURES}")
     return 0 if not FAILURES else 1
 
