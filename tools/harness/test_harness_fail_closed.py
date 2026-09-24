@@ -318,8 +318,21 @@ def test_mandatory_capabilities_happy_path_has_no_failures() -> None:
     with tempfile.TemporaryDirectory() as td:
         instance = Path(td)
         (instance / "optionsshaders.txt").write_text("PROBE_MODE=1\n", encoding="utf-8")
+        shots = instance / "shots"
+        shots.mkdir()
+        att_entries = []
+        for m in range(6):
+            blob = f"P0MODE{m}".encode() * 64
+            name = f"exp_mode{m}.png"
+            (shots / name).write_bytes(blob)
+            import hashlib as _hl
+            att_entries.append({
+                "mode": m, "status": "PASS", "capture": name,
+                "capture_sha256": _hl.sha256(blob).hexdigest(),
+            })
+        attestation = {"tested_tree_sha": "test", "attestations": att_entries}
         caps = evaluate_capabilities(
-            analysis, {}, Path("/missing.jar"), instance, None,
+            analysis, {}, Path("/missing.jar"), instance, shots, attestation,
         )
     failed = mandatory_failures(caps)
     check("mandatory_happy_path_has_no_failures",
@@ -333,6 +346,102 @@ def test_mandatory_capabilities_happy_path_has_no_failures() -> None:
                   "colortex_skip_clear", "frameCounter / frameTime",
               )),
           f"failures={failed}, exit={evaluator_exit_code(caps)}")
+
+
+def test_mode_attestation_bad_hash_is_not_pass() -> None:
+    """A tampered capture (hash mismatch) must not promote profiles/options."""
+    import hashlib as _hl
+    analysis = {
+        "pack_loaded": True, "pack_name": "X", "worlds_detected": None,
+        "block_mapping_parsed": False, "block_mapping_warnings": [],
+        "block_mapping_invalid_ids": [], "block_mapping_accepted_ids": [],
+        "probe_mode_registration": False, "probe_mode_transition_values": [],
+        "uniforms_exercised": False,
+        "custom_uniforms": [], "buffer_formats": {}, "skip_clear_buffers": [],
+        "ping_pong_flips": [], "programs_loaded": ["final"],
+        "programs_disabled": [], "custom_textures_loaded": [],
+        "custom_noise_loaded": False, "framebuffer_created": True,
+        "errors": [], "warnings": [],
+    }
+    with tempfile.TemporaryDirectory() as td:
+        shots = Path(td)
+        entries = []
+        for m in range(6):
+            name = f"exp_mode{m}.png"
+            (shots / name).write_bytes(b"real-bytes")
+            entries.append({
+                "mode": m, "status": "PASS", "capture": name,
+                "capture_sha256": _hl.sha256(b"tampered-bytes").hexdigest(),
+            })
+        caps = evaluate_capabilities(
+            analysis, {}, Path("/missing.jar"), Path(td),
+            shots, {"attestations": entries},
+        )
+    check("attestation_bad_hash_not_pass",
+          caps["profiles/options"]["status"] == "INCONCLUSIVE",
+          caps["profiles/options"]["evidence"])
+
+
+def test_mode_attestation_missing_mode_is_not_pass() -> None:
+    """Attestation covering only 5 of 6 modes must not promote the capability."""
+    import hashlib as _hl
+    analysis = {
+        "pack_loaded": True, "pack_name": "X", "worlds_detected": None,
+        "block_mapping_parsed": False, "block_mapping_warnings": [],
+        "block_mapping_invalid_ids": [], "block_mapping_accepted_ids": [],
+        "probe_mode_registration": False, "probe_mode_transition_values": [],
+        "uniforms_exercised": False,
+        "custom_uniforms": [], "buffer_formats": {}, "skip_clear_buffers": [],
+        "ping_pong_flips": [], "programs_loaded": ["final"],
+        "programs_disabled": [], "custom_textures_loaded": [],
+        "custom_noise_loaded": False, "framebuffer_created": True,
+        "errors": [], "warnings": [],
+    }
+    with tempfile.TemporaryDirectory() as td:
+        shots = Path(td)
+        entries = []
+        for m in range(5):  # mode 5 absent
+            blob = f"MODE{m}".encode()
+            name = f"exp_mode{m}.png"
+            (shots / name).write_bytes(blob)
+            entries.append({
+                "mode": m, "status": "PASS", "capture": name,
+                "capture_sha256": _hl.sha256(blob).hexdigest(),
+            })
+        caps = evaluate_capabilities(
+            analysis, {}, Path("/missing.jar"), Path(td),
+            shots, {"attestations": entries},
+        )
+    check("attestation_missing_mode_not_pass",
+          caps["profiles/options"]["status"] == "INCONCLUSIVE",
+          caps["profiles/options"]["evidence"])
+
+
+def test_badge_identification_matches_mode_colors() -> None:
+    """identify_badge resolves each badge fill to its mode (pure function)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        check("badge_identify_requires_pillow", False, "Pillow unavailable")
+        return
+    import tempfile
+    from run_p0_suite import identify_badge, MODE_BADGE_COLORS
+    for mode, (er, eg, eb) in MODE_BADGE_COLORS.items():
+        img = Image.new("RGB", (1280, 720), (10, 10, 10))
+        px = img.load()
+        for y in range(19, 54):
+            for x in range(30, 201):
+                px[x, y] = (er, eg, eb)
+        with tempfile.NamedTemporaryFile("wb", suffix=".png", delete=False) as f:
+            img.save(f.name)
+            shot = Path(f.name)
+        try:
+            seen, dist, berr = identify_badge(shot)
+        finally:
+            shot.unlink(missing_ok=True)
+        check(f"badge_identify_mode_{mode}",
+              seen == mode and dist < 60.0,
+              f"seen={seen} dist={dist:.1f} err={berr}")
 
 
 def test_generic_reinit_does_not_prove_dimension_target() -> None:
@@ -524,6 +633,9 @@ def main() -> int:
     test_world_capability_is_required_and_strict()
     test_mandatory_capabilities_happy_path_has_no_failures()
     test_generic_reinit_does_not_prove_dimension_target()
+    test_mode_attestation_bad_hash_is_not_pass()
+    test_mode_attestation_missing_mode_is_not_pass()
+    test_badge_identification_matches_mode_colors()
     test_probe_mode_parser_handles_real_lines()
     test_probe_mode_parser_bounded_transitions()
     test_dimension_events_separated_from_world_folder_loads()

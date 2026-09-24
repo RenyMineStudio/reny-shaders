@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -369,6 +370,55 @@ def parse_shader_logs(log_text: str) -> Dict[str, Any]:
     return results
 
 
+def validate_mode_attestation(
+    attestation: Optional[Dict[str, Any]],
+    screenshot_dir: Optional[Path],
+) -> Tuple[bool, str]:
+    """Validate suite badge attestations as profiles/options evidence.
+
+    PASS requires an attestation document covering modes 0-5, every entry
+    status PASS, and every named capture present on disk with matching
+    SHA-256. Anything weaker (missing file, uncovered mode, hash mismatch,
+    unreadable capture) is INCONCLUSIVE, never PASS.
+    """
+    if not attestation or not isinstance(attestation, dict):
+        return False, "no mode attestation document provided"
+    entries = attestation.get("attestations")
+    if not isinstance(entries, list) or not entries:
+        return False, "attestation document has no entries"
+    by_mode: Dict[int, Dict[str, Any]] = {}
+    for e in entries:
+        if isinstance(e, dict) and e.get("status") == "PASS" and isinstance(e.get("mode"), int):
+            by_mode.setdefault(e["mode"], e)
+    missing = [m for m in range(6) if m not in by_mode]
+    if missing:
+        return False, f"attested modes incomplete, missing: {missing}"
+    if screenshot_dir is None:
+        return False, "no screenshot dir to verify attested captures against"
+    try:
+        shot_dir = Path(screenshot_dir)
+    except (TypeError, ValueError) as exc:
+        return False, f"bad screenshot dir: {exc}"
+    problems: List[str] = []
+    for m in range(6):
+        e = by_mode[m]
+        name = e.get("capture")
+        want = e.get("capture_sha256")
+        if not name or not want:
+            problems.append(f"mode {m}: attestation lacks capture/hash")
+            continue
+        try:
+            data = (shot_dir / str(name)).read_bytes()
+        except OSError as exc:
+            problems.append(f"mode {m}: capture unreadable: {exc}")
+            continue
+        if hashlib.sha256(data).hexdigest() != want:
+            problems.append(f"mode {m}: capture hash mismatch")
+    if problems:
+        return False, "; ".join(problems)
+    return True, "modes 0-5 badge-attested with hash-verified captures"
+
+
 def read_probe_mode_from_options(instance_dir: Path) -> Tuple[Optional[int], str]:
     p = instance_dir / "optionsshaders.txt"
     try:
@@ -412,6 +462,7 @@ def evaluate_capabilities(
     optifine_jar: Path,
     instance_dir: Path,
     screenshot_dir: Optional[Path] = None,
+    mode_attestation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Classify E7 capabilities; evidence text never exceeds the checked predicate."""
     progs = set(log_analysis.get("programs_loaded", []))
@@ -517,31 +568,43 @@ def evaluate_capabilities(
         "evidence": i_ev, "notes": "Depth-10 nesting is parser documentation, not measured here",
     }
 
-    # 8. profiles/options: require registration plus an observed transition
-    # and persisted target value; current-file presence alone is insufficient.
+    # 8. profiles/options: registration + badge-attested runtime effect.
+    # The optionsshaders.txt file channel is PROVEN non-persisting
+    # in-session on this stack (2026-09-24: GUI advances screenshot-proven
+    # while the file keeps the boot value), so a persisted-value predicate
+    # can never pass and is not used. PASS requires the declared profiles
+    # source plus suite badge attestations for modes 0-5 with hash-verified
+    # captures; anything weaker is INCONCLUSIVE, never PASS.
     props_file = SHADERS_DIR / "shaders.properties"
+    att_ok, att_msg = validate_mode_attestation(mode_attestation, screenshot_dir)
     probe_val, probe_msg = read_probe_mode_from_options(instance_dir)
     transitions = log_analysis.get("probe_mode_transition_values", [])
-    mode_specific = (
-        props_file.is_file()
-        and log_analysis.get("probe_mode_registration", False)
-        and len(transitions) >= 2
-        and probe_val is not None
-        and probe_val in transitions
-    )
-    if mode_specific and pack_loaded and not has_errors:
-        p_st, p_ev = "PASS", f"PROBE_MODE registered, changed through {transitions}, and {probe_msg}"
-    else:
-        p_st, p_ev = "INCONCLUSIVE", (
-            "profiles/options unproven: requires registration, at least two observed "
-            f"mode values, and persisted value; registration={log_analysis.get('probe_mode_registration')}, "
-            f"transitions={transitions}, persisted={probe_msg}"
+    if props_file.is_file() and att_ok and pack_loaded and not has_errors:
+        p_st, p_ev = "PASS", (
+            f"Profiles declared; modes 0-5 rendered and badge-proven: {att_msg}; "
+            f"file reads {probe_msg} (informational only)"
         )
+    else:
+        legs = []
+        if not props_file.is_file():
+            legs.append("shaders.properties absent")
+        if not att_ok:
+            legs.append(f"mode attestation invalid: {att_msg}")
+        if not pack_loaded:
+            legs.append("pack load unobserved")
+        if has_errors:
+            legs.append(f"{len(errors)} errors observed")
+        legs.append(f"log transitions={transitions}, file says: {probe_msg}")
+        p_st, p_ev = "INCONCLUSIVE", "profiles/options unproven: " + "; ".join(legs)
     capabilities["profiles/options"] = {
         "status": p_st,
-        "description": "Profile declarations and PROBE_MODE option registration/persistence",
+        "description": "Profile declarations and PROBE_MODE option registration/runtime effect",
         "evidence": p_ev,
-        "notes": "Mode-cycle persistence is additionally evidenced by suite mode_change gates",
+        "notes": (
+            "Mode exercise is proven by suite badge gates (render truth), not "
+            "by optionsshaders.txt, which E7 does not persist in-session on "
+            "this stack. Transitions in logs, when present, are supplementary."
+        ),
     }
 
     # 9. block.properties (vanilla): every expected ID must be observed accepted.
@@ -689,6 +752,7 @@ def generate_report(
     output_md: Path,
     tested_tree_sha: str,
     probe_mode_value: Optional[int],
+    mode_attestation: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[str], Optional[str]]:
     head_sha, is_clean = get_git_state()
     timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -723,6 +787,15 @@ def generate_report(
             "os": system_info.get("os"), "kernel": system_info.get("kernel"),
         },
         "probe_mode_persisted": probe_mode_value,
+        "mode_attestation": (
+            None if not mode_attestation else {
+                "tested_tree_sha": mode_attestation.get("tested_tree_sha"),
+                "generated": mode_attestation.get("generated"),
+                "modes_attested": sorted(
+                    e.get("mode") for e in mode_attestation.get("attestations", [])
+                    if isinstance(e, dict) and e.get("status") == "PASS"),
+            }
+        ),
         "log_analysis": log_analysis,
         "capabilities": capabilities,
         "mandatory_failures": failed,
@@ -837,7 +910,19 @@ def main() -> int:
     shot_dir = args.screenshot_dir
     if shot_dir is not None and not isinstance(shot_dir, Path):
         shot_dir = Path(shot_dir)
-    capabilities = evaluate_capabilities(log_analysis, system_info, args.optifine_jar, args.instance, shot_dir)
+    mode_attestation: Optional[Dict[str, Any]] = None
+    if shot_dir is not None:
+        att_path = shot_dir / "mode_attestations.json"
+        try:
+            mode_attestation = json.loads(att_path.read_text(encoding="utf-8"))
+            print(f"Loaded mode attestations: {att_path}")
+        except FileNotFoundError:
+            print(f"No mode attestations at {att_path}; profiles/options stays INCONCLUSIVE")
+        except (OSError, ValueError) as exc:
+            print(f"Mode attestations unloadable ({exc}); profiles/options stays INCONCLUSIVE")
+            mode_attestation = None
+    capabilities = evaluate_capabilities(log_analysis, system_info, args.optifine_jar, args.instance, shot_dir,
+                                         mode_attestation)
 
     failed = mandatory_failures(capabilities)
     print("Evaluation results:")
@@ -852,7 +937,8 @@ def main() -> int:
         out_json = args.output_dir / "p0_probe_report.json"
         out_md = args.output_dir / "p0_probe_report.md"
         failed_now, _ = generate_report(system_info, log_analysis, capabilities,
-                                        out_json, out_md, tested_sha, probe_val)
+                                        out_json, out_md, tested_sha, probe_val,
+                                        mode_attestation)
         print(f"Generated report: {out_json}")
         print(f"Generated Markdown: {out_md}")
         failed = failed_now

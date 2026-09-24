@@ -222,6 +222,66 @@ def _measure_button_rows_after_grab(suite: "P0Suite", name: str) -> Optional[Lis
     return rows or None
 
 
+# Probe-mode badge colors (probe_hud.glsl renderModeBadge, 0-255).
+# Badge interior in content fractions: x [0.023, 0.152], y-from-top [0.026, 0.074].
+MODE_BADGE_COLORS: Dict[int, Tuple[int, int, int]] = {
+    0: (26, 102, 26),    # green = baseline
+    1: (26, 51, 179),    # blue = capability
+    2: (204, 102, 0),    # orange = history
+    3: (179, 26, 153),   # magenta = material
+    4: (0, 153, 179),    # cyan = formats
+    5: (179, 179, 0),    # yellow = deferred
+}
+MODE_BADGE_NAMES: Dict[int, str] = {
+    0: "baseline", 1: "capability", 2: "history",
+    3: "material", 4: "formats", 5: "deferred",
+}
+BADGE_MATCH_MAX_DIST = 60.0
+
+
+def identify_badge(image_path: Path) -> Tuple[Optional[int], float, Optional[str]]:
+    """Identify the rendered PROBE_MODE from the badge box (pure).
+
+    Returns (mode|None, euclidean distance to nearest mode color, error).
+    Mode None means no badge-like fill was decisive. Requires Pillow;
+    without it returns (None, inf, error) so callers fail closed.
+    """
+    try:
+        from PIL import Image
+        import statistics
+    except ImportError:
+        return None, float("inf"), "Pillow unavailable for badge identification"
+    try:
+        img = Image.open(image_path).convert("RGB")
+    except OSError as exc:
+        return None, float("inf"), f"badge image unreadable: {exc}"
+    w, h = img.size
+    if w < 200 or h < 100:
+        return None, float("inf"), f"badge image too small: {w}x{h}"
+    x0, x1 = int(w * 0.023), int(w * 0.152)
+    y0, y1 = int(h * 0.026), int(h * 0.074)
+    try:
+        px = [
+            img.getpixel((x, y))
+            for y in range(y0, y1, 2)
+            for x in range(x0, x1, 3)
+        ]
+    except IndexError as exc:
+        return None, float("inf"), f"badge box out of range: {exc}"
+    if not px:
+        return None, float("inf"), "badge box empty"
+    mr = statistics.median(p[0] for p in px)
+    mg = statistics.median(p[1] for p in px)
+    mb = statistics.median(p[2] for p in px)
+    best: Optional[int] = None
+    best_d = float("inf")
+    for mode, (er, eg, eb) in MODE_BADGE_COLORS.items():
+        d = ((mr - er) ** 2 + (mg - eg) ** 2 + (mb - eb) ** 2) ** 0.5
+        if d < best_d:
+            best_d, best = d, mode
+    return best, best_d, None
+
+
 def compute_sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -535,6 +595,13 @@ class P0Suite:
         # uncalibrated (fail-closed callers must calibrate before menu nav).
         self.pointer_corr_y: float = 0.0
         self.pointer_calibrated: bool = False
+        # In-memory PROBE_MODE assumption (fresh boot == file value, proven
+        # by the badge-0 gate; None when unknown). The file is NOT consulted
+        # after boot: proven non-persisting in-session on this stack.
+        self.probe_assumed: Optional[int] = None
+        # Mode badge attestations (mode, expected/observed RGB, capture,
+        # capture SHA-256) consumed by probe_runner for profiles/options.
+        self.attestations: List[Dict[str, Any]] = []
 
     # -- gate bookkeeping ----------------------------------------------------
     def record_gate(self, name: str, status: str, evidence: str, error: Optional[str] = None) -> None:
@@ -783,14 +850,17 @@ class P0Suite:
         command: str,
         confirm_pattern: str,
         timeout: float = 15.0,
+        attempts: int = 2,
     ) -> Tuple[bool, str, Optional[str]]:
         """Send a chat command and prove the SERVER acted on it.
 
         xdotool success alone never counts as execution: after sending the
         keys, a fresh-log wait must observe the server's confirmation line.
-        One retry is allowed; persistent absence is an explicit failure.
+        Post-transition commands use more attempts/longer timeouts (the
+        integrated server lags under chunk-gen + shader-recompile load).
+        Persistent absence is an explicit failure.
         """
-        for attempt in (1, 2):
+        for attempt in range(1, attempts + 1):
             cursors = capture_all(self.log_paths)
             ok, send_err = self.send_chat_command(command)
             if not ok:
@@ -803,7 +873,7 @@ class P0Suite:
             last_err = (f"attempt {attempt}: no server confirmation: {wait.evidence} "
                         f"(error: {wait.error})")
             time.sleep(1.0)
-        return False, "", f"command {command!r} unverified after 2 attempts: {last_err}"
+        return False, "", f"command {command!r} unverified after {attempts} attempts: {last_err}"
 
     def ensure_in_game(self, tries: int = 4) -> Tuple[bool, Optional[str]]:
         """Prove the player is in-game (not in a menu/title/death screen).
@@ -825,6 +895,13 @@ class P0Suite:
                 return False, f"ensure_in_game: Escape failed: {res.error}"
             time.sleep(1.5)
         return False, f"not verifiably in-game after {tries} attempts: {last_err}"
+
+    def _sha_of(self, filename: str) -> Optional[str]:
+        """SHA-256 of a file in the screenshot dir (None on any failure)."""
+        try:
+            return compute_sha256(self.screenshot_dir / filename)
+        except OSError:
+            return None
 
     def resize_window(self, geometry: str) -> Tuple[bool, Optional[str]]:
         res = run_checked(["wmctrl", "-r", "Minecraft 1.7.10", "-e", geometry])
@@ -872,7 +949,14 @@ class P0Suite:
 
     # -- composite GUI flows (propagate every internal failure) --------------
     def reload_shaders_via_gui(self) -> Tuple[bool, str, Optional[str]]:
-        """Reload shaders via in-game settings; prove with fresh framebuffer evidence."""
+        """Reload shaders via in-game settings; prove with fresh framebuffer evidence.
+
+        A bare Shaders-Done press is a proven no-op on this stack (no reinit
+        lines, 2026-09-24): the recompile only fires when options are dirty.
+        This gate therefore advances PROBE_MODE 0 -> 1 -> 2 in one Shader
+        Options visit (two clicks, in-memory only) and Dones out, so the
+        recompile is real. The suite's assumed mode becomes 2 afterwards.
+        """
         w, err = self.get_window()
         if not w:
             return False, "", err or "reload aborted: no window"
@@ -883,138 +967,193 @@ class P0Suite:
             return False, "", "reload aborted, log cursor failed: " + "; ".join(
                 f"{c.path.name}: {c.error}" for c in bad)
 
-        ok, gerr = self.ensure_in_game()
+        if self.probe_assumed != 0:
+            return False, "", (
+                f"reload aborted: assumed mode is {self.probe_assumed}, want 0 "
+                "(badge-0 proof must precede the reload gate)"
+            )
+
+        ok, err = self.open_shader_options()
         if not ok:
-            return False, "", f"reload aborted, not in-game: {gerr}"
-
-        failures: List[str] = []
-
-        def step(cmd: List[str], sleep_after: float = 0.0) -> None:
-            res = run_checked(cmd)
-            if not res.ok:
-                failures.append(f"{' '.join(cmd)} -> {res.error}")
-            if sleep_after:
-                time.sleep(sleep_after)
-
-        step(["xdotool", "key", "Escape"], 1.5)
-        # The pause-screen Options... click is destructive-adjacent (one row
-        # above Save&Quit): hover-verify before pressing. Inner-menu targets
-        # use corrected clicks; their worst case is a wrong submenu, which
-        # the fresh-log evidence wait below catches as FAIL (never a quit).
-        ok_c, cerr = self.click_verified_menu(
-            MENU_PAUSE_OPTIONS[0], MENU_PAUSE_OPTIONS[1],
-            PAUSE_OPTIONS_ROW_PX, "Options...",
-        )
-        if not ok_c:
-            return False, "", f"reload aborted, pause nav unsafe: {cerr}"
-        nav = [
-            (MENU_OPTIONS_VIDEO, 0.8, "Video Settings..."),
-            (MENU_VIDEO_SHADERS, 1.0, "Shaders..."),
-        ]
-        for (rx, ry), d, label in nav:
-            ok_c, cerr = self.click_relative(rx, ry, delay=d)
+            return False, "", f"reload aborted, nav failed: {err}"
+        for _ in range(2):
+            ok_c, cerr = self.click_relative(
+                MENU_SHADEROPTS_PROBE[0], MENU_SHADEROPTS_PROBE[1], delay=2.0)
             if not ok_c:
-                failures.append(f"click {label} ({rx},{ry}) -> {cerr}")
-        for (rx, ry), d, label in [
-            (MENU_SHADERS_DONE, 2.5, "Done/Shaders"),
-            (MENU_VIDEO_DONE, 0.8, "Done/Video"),
-            (MENU_OPTIONS_DONE, 0.8, "Done/Options"),
-        ]:
-            ok_c, cerr = self.click_relative(rx, ry, delay=d)
-            if not ok_c:
-                failures.append(f"click {label} ({rx},{ry}) -> {cerr}")
-        step(["xdotool", "key", "Escape"], 1.0)
+                self.probe_assumed = None
+                return False, "", f"reload aborted, Probe Mode click failed: {cerr}"
+        ok, err = self.close_shader_menus()
+        if not ok:
+            return False, "", f"reload aborted, Done chain failed: {err}"
+        self.probe_assumed = 2
 
-        if failures:
-            return False, "", f"reload GUI steps failed: {'; '.join(failures)}"
-
-        wait = wait_for_fresh_combined(cursors, r"Framebuffer created\.|Program loaded: final", timeout=30.0)
+        wait = wait_for_fresh_combined(cursors, r"Framebuffer created\.|Program loaded: final", timeout=45.0)
         if not wait.matched:
             return False, "", f"reload not evidenced in fresh log: {wait.evidence} (error: {wait.error})"
         return True, wait.evidence, None
 
-    def cycle_shader_option_mode(self) -> Tuple[bool, Optional[int], Optional[int], Optional[str]]:
-        """Cycle PROBE_MODE via Shader Options; verify persistence in optionsshaders.txt."""
-        w, err = self.get_window()
-        if not w:
-            return False, None, None, err or "mode cycle aborted: no window"
+    def open_shader_options(self) -> Tuple[bool, Optional[str]]:
+        """Navigate pause -> Options -> Video -> Shaders -> Shader Options.
 
-        before, rerr = read_probe_mode_option(self.options_path)
-        if rerr is not None:
-            # Missing key before the cycle is a hard diagnostic, not silent.
-            return False, before, None, f"pre-cycle PROBE_MODE unreadable: {rerr}"
-
+        Leaves the Shader Options screen open. All clicks use the session
+        pointer correction; the pause click is hover-verified (destructive-
+        adjacent). Any failure aborts WITHOUT further clicks.
+        """
         ok, gerr = self.ensure_in_game()
         if not ok:
-            return False, before, None, f"mode cycle aborted, not in-game: {gerr}"
-
-        failures: List[str] = []
+            return False, f"shader-options nav aborted, not in-game: {gerr}"
         res = run_checked(["xdotool", "key", "Escape"])
         if not res.ok:
-            failures.append(f"Escape -> {res.error}")
-        time.sleep(1.5)
+            return False, f"Escape failed: {res.error}"
+        time.sleep(2.0)
         ok_c, cerr = self.click_verified_menu(
             MENU_PAUSE_OPTIONS[0], MENU_PAUSE_OPTIONS[1],
             PAUSE_OPTIONS_ROW_PX, "Options...",
         )
         if not ok_c:
-            return False, before, None, f"mode cycle aborted, pause nav unsafe: {cerr}"
-        nav = [
-            (MENU_OPTIONS_VIDEO, 0.8, "Video Settings..."),
-            (MENU_VIDEO_SHADERS, 1.0, "Shaders..."),
-            (MENU_SHADERS_OPTIONS, 1.2, "Shader Options..."),
-            (MENU_SHADEROPTS_PROBE, 1.0, "Probe Mode button"),
-            (MENU_SHADEROPTS_DONE, 2.5, "Done/ShaderOpts"),
-            (MENU_SHADERS_DONE, 0.8, "Done/Shaders"),
-            (MENU_VIDEO_DONE, 0.8, "Done/Video"),
-            (MENU_OPTIONS_DONE, 0.8, "Done/Options"),
-        ]
-        for (rx, ry), d, label in nav:
+            return False, f"pause nav unsafe: {cerr}"
+        for (rx, ry), d, label in [
+            (MENU_OPTIONS_VIDEO, 2.0, "Video Settings..."),
+            (MENU_VIDEO_SHADERS, 2.0, "Shaders..."),
+            (MENU_SHADERS_OPTIONS, 2.0, "Shader Options..."),
+        ]:
             ok_c, cerr = self.click_relative(rx, ry, delay=d)
             if not ok_c:
-                failures.append(f"click {label} ({rx},{ry}) -> {cerr}")
+                return False, f"click {label} ({rx},{ry}) -> {cerr}"
+        return True, None
+
+    def close_shader_menus(self) -> Tuple[bool, Optional[str]]:
+        """Press Done down the shader menu stack back toward the game."""
+        for (rx, ry), d, label in [
+            (MENU_SHADEROPTS_DONE, 2.5, "Done/ShaderOpts"),
+            (MENU_SHADERS_DONE, 2.0, "Done/Shaders"),
+            (MENU_VIDEO_DONE, 2.0, "Done/Video"),
+            (MENU_OPTIONS_DONE, 2.0, "Done/Options"),
+        ]:
+            ok_c, cerr = self.click_relative(rx, ry, delay=d)
+            if not ok_c:
+                self.probe_assumed = None
+                return False, f"click {label} ({rx},{ry}) -> {cerr}"
         res = run_checked(["xdotool", "key", "Escape"])
         if not res.ok:
-            failures.append(f"final Escape -> {res.error}")
-        time.sleep(1.0)
+            self.probe_assumed = None
+            return False, f"final Escape -> {res.error}"
+        time.sleep(1.5)
+        return True, None
 
-        if failures:
-            return False, before, None, f"mode cycle GUI steps failed: {'; '.join(failures)}"
+    def goto_mode(self, target: int) -> Tuple[bool, Optional[str]]:
+        """Advance the in-memory PROBE_MODE to target via GUI clicks.
 
-        # Poll runtime options file: OptiFine persists asynchronously after Done.
-        after: Optional[int] = None
-        last_err: Optional[str] = None
-        for _ in range(10):
-            after, last_err = read_probe_mode_option(self.options_path)
-            if last_err is None and after is not None and after != before:
-                break
-            time.sleep(0.5)
-        if last_err is not None or after is None:
-            return False, before, after, f"post-cycle PROBE_MODE unreadable: {last_err}"
-        if after == before:
-            return False, before, after, f"PROBE_MODE did not advance (before={before}, after={after})"
-        if not (0 <= after <= 5):
-            return False, before, after, f"PROBE_MODE out of range after cycle: {after}"
-        return True, before, after, None
-
-    def cycle_to_mode(self, target: int) -> Tuple[bool, Optional[int], Optional[int], Optional[str]]:
-        """Advance PROBE_MODE via repeated GUI cycles until it equals target (max 6 steps)."""
+        Tracks the assumed in-memory value (fresh boot = file value, proven
+        by the badge-0 gate). Clicks = (target - assumed) mod 6 in a single
+        Shader Options visit, then Done chain (dirty options trigger the
+        recompile that applies the value to the render). Render proof happens
+        on the capture via identify_badge, never via optionsshaders.txt
+        (proven non-persisting in-session on this stack, 2026-09-24).
+        """
         if not (0 <= target <= 5):
-            return False, None, None, f"target out of range: {target}"
-        start_val, rerr = read_probe_mode_option(self.options_path)
-        if rerr is not None:
-            return False, start_val, None, f"initial PROBE_MODE unreadable: {rerr}"
-        if start_val == target:
-            return True, start_val, target, None
-        current = start_val
-        for _ in range(6):
-            ok, _, after, err = self.cycle_shader_option_mode()
-            if not ok:
-                return False, start_val, after, err
-            current = after  # type: ignore[assignment]
-            if current == target:
-                return True, start_val, current, None
-        return False, start_val, current, f"did not reach mode {target} within 6 cycles (ended at {current})"
+            return False, f"target out of range: {target}"
+        if self.probe_assumed is None:
+            return False, "assumed mode unknown; badge-0 proof required first"
+        clicks = (target - self.probe_assumed) % 6
+        ok, err = self.open_shader_options()
+        if not ok:
+            return False, err
+        for _ in range(clicks):
+            ok_c, cerr = self.click_relative(
+                MENU_SHADEROPTS_PROBE[0], MENU_SHADEROPTS_PROBE[1], delay=2.0)
+            if not ok_c:
+                self.probe_assumed = None
+                return False, f"Probe Mode button click failed: {cerr}"
+        ok, err = self.close_shader_menus()
+        if not ok:
+            return False, err
+        self.probe_assumed = target
+        return True, None
+
+    def capture_and_prove_mode(
+        self, gate_base: str, target: int, scenario: str, observation: str,
+    ) -> bool:
+        """Capture a scenario and prove the rendered mode via badge color.
+
+        Records `{base}_capture` and `{base}_badge` gates plus a mode
+        attestation entry (mode, expected/observed RGB, distance, capture,
+        capture SHA-256). On mismatch the assumed mode resyncs to the
+        identified render (or None when unreadable) so the caller can retry
+        from truth instead of a stale assumption. Returns True iff the
+        render proves the target mode.
+        """
+        ok_s, path, serr = self.capture_screen(scenario, observation)
+        if not ok_s or path is None:
+            self.record_gate(f"{gate_base}_capture", "FAIL", f"{scenario} capture failed", error=serr)
+            self.attestations.append({
+                "mode": target, "status": "FAIL", "reason": f"capture failed: {serr}",
+                "capture": scenario + ".png", "capture_sha256": None,
+            })
+            return False
+        self.record_gate(f"{gate_base}_capture", "PASS", f"Captured {scenario} at assumed PROBE_MODE={target}")
+        seen, dist, berr = identify_badge(path)
+        try:
+            sha = compute_sha256(path)
+        except OSError as exc:
+            sha = None
+            berr = (berr + "; " if berr else "") + f"sha256 failed: {exc}"
+        exp = MODE_BADGE_COLORS[target]
+        ok_badge = seen == target and dist < BADGE_MATCH_MAX_DIST and sha is not None
+        self.attestations.append({
+            "mode": target,
+            "mode_name": MODE_BADGE_NAMES[target],
+            "status": "PASS" if ok_badge else "FAIL",
+            "expected_rgb": list(exp),
+            "observed_badge": None if seen is None else {
+                "mode": seen, "mode_name": MODE_BADGE_NAMES.get(seen),
+                "distance": round(dist, 1),
+            },
+            "capture": path.name,
+            "capture_sha256": sha,
+            "error": None if ok_badge else (berr or f"badge shows mode {seen}, want {target}"),
+        })
+        if ok_badge:
+            self.record_gate(
+                f"{gate_base}_badge", "PASS",
+                f"Badge proves mode {target} ({MODE_BADGE_NAMES[target]}): "
+                f"observed RGB matches {list(exp)} (dist {dist:.1f}) in {path.name}",
+            )
+            self.probe_assumed = target
+            return True
+        self.probe_assumed = seen
+        self.record_gate(
+            f"{gate_base}_badge", "FAIL",
+            f"Badge does not prove mode {target}: seen={seen} dist={dist:.1f}",
+            error=berr,
+        )
+        return False
+
+    def goto_mode_and_capture(
+        self, gate_base: str, target: int, scenario: str, observation: str,
+    ) -> None:
+        """Drive to target mode, capture, and prove via badge (<=2 rounds).
+
+        Round 1 navigates from the assumed mode and checks the render; on a
+        mismatch the assumption resyncs to the identified render and round 2
+        retries from truth. Exhaustion is an honest FAIL, never a promotion.
+        """
+        for attempt in (1, 2):
+            ok_g, gerr = self.goto_mode(target)
+            if not ok_g:
+                self.record_gate(f"{gate_base}_mode_change", "FAIL",
+                                  f"Mode navigation failed (attempt {attempt})", error=gerr)
+                return
+            if attempt == 1:
+                self.record_gate(f"{gate_base}_mode_change", "PASS",
+                                  f"Navigated to PROBE_MODE {target} (in-memory, attempt {attempt})")
+            if self.capture_and_prove_mode(gate_base, target, scenario, observation):
+                return
+            if self.probe_assumed is None:
+                self.record_gate(f"{gate_base}_mode_change", "FAIL",
+                                  "Badge unreadable; cannot resync assumed mode", error=gerr)
+                return
+        # Attempts exhausted: navigation worked, render never proved target.
 
     def perform_camera_motion(self, duration: float = 2.0) -> Tuple[bool, Optional[str]]:
         ok, ferr = self.focus_window()
@@ -1039,6 +1178,27 @@ class P0Suite:
         return True, None
 
     # -- manifest ------------------------------------------------------------
+    def write_attestations(self, tested_tree_sha: str) -> None:
+        """Write mode badge attestations for probe_runner (always, even partial).
+
+        Lives in the screenshot dir (external artifacts, never versioned).
+        Each entry binds mode -> expected/observed badge RGB -> capture file
+        -> capture SHA-256, so the evaluator can verify captures hash-match
+        instead of trusting bare claims.
+        """
+        import json as _json
+        doc = {
+            "tested_tree_sha": tested_tree_sha,
+            "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "attestations": self.attestations,
+        }
+        try:
+            path = self.screenshot_dir / "mode_attestations.json"
+            path.write_text(_json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+            print(f"Wrote mode attestations to: {path}")
+        except OSError as exc:
+            print(f"WARNING: attestations write failed: {exc}")
+
     def write_manifest(self, tested_tree_sha: str) -> Tuple[bool, Optional[str]]:
         try:
             res_head = run_checked(["git", "rev-parse", "HEAD"])
@@ -1148,20 +1308,49 @@ class P0Suite:
         # 1. EXP-P0-STACK: Overworld baseline
         # -----------------------------------------------------------------
         print("\n--- Gate: EXP-P0-STACK (Overworld) ---")
-        ok, evidence, err = self.reload_shaders_via_gui()
-        if not ok:
-            self.record_gate("shader_reload_gui", "FAIL", "Shader reload via GUI not evidenced", error=err)
-        else:
-            self.record_gate("shader_reload_gui", "PASS", f"Reload evidenced: {evidence}")
-
         ok, _, err = self.capture_screen(
             "exp_p0_stack_overworld_day_still",
             "Overworld day scene rendering with terrain, water, foliage, and mode badge",
         )
         if not ok:
             self.record_gate("capture_overworld_still", "FAIL", "Overworld still capture failed", error=err)
+            self.write_manifest(tested_tree_sha)
+            return 1
+        self.record_gate("capture_overworld_still", "PASS", "Captured Overworld still screenshot")
+        # Badge-0 proof: on a fresh boot the in-memory mode equals the file
+        # value (0). This synchronizes the suite's assumed mode counter; any
+        # other render aborts before blind mode navigation.
+        seen0, dist0, berr0 = identify_badge(
+            self.screenshot_dir / "exp_p0_stack_overworld_day_still.png")
+        self.attestations.append({
+            "mode": 0, "mode_name": MODE_BADGE_NAMES[0],
+            "status": "PASS" if (seen0 == 0 and dist0 < BADGE_MATCH_MAX_DIST) else "FAIL",
+            "expected_rgb": list(MODE_BADGE_COLORS[0]),
+            "observed_badge": None if seen0 is None else {
+                "mode": seen0, "mode_name": MODE_BADGE_NAMES.get(seen0),
+                "distance": round(dist0, 1),
+            },
+            "capture": "exp_p0_stack_overworld_day_still.png",
+            "capture_sha256": self._sha_of("exp_p0_stack_overworld_day_still.png"),
+            "error": None if (seen0 == 0 and dist0 < BADGE_MATCH_MAX_DIST) else (
+                berr0 or f"badge shows mode {seen0}, want 0"),
+        })
+        if not (seen0 == 0 and dist0 < BADGE_MATCH_MAX_DIST):
+            self.record_gate("overworld_baseline_badge", "FAIL",
+                              f"Fresh-boot render is not mode 0 (seen={seen0} dist={dist0:.1f}); "
+                              "assumed-mode counter cannot sync, aborting",
+                              error=berr0)
+            self.write_manifest(tested_tree_sha)
+            return 1
+        self.record_gate("overworld_baseline_badge", "PASS",
+                          f"Badge proves fresh-boot mode 0 (dist {dist0:.1f})")
+        self.probe_assumed = 0
+
+        ok, evidence, err = self.reload_shaders_via_gui()
+        if not ok:
+            self.record_gate("shader_reload_gui", "FAIL", "Shader reload via GUI not evidenced", error=err)
         else:
-            self.record_gate("capture_overworld_still", "PASS", "Captured Overworld still screenshot")
+            self.record_gate("shader_reload_gui", "PASS", f"Reload evidenced: {evidence}")
 
         ok_m, merr = self.perform_camera_motion(1.5)
         if not ok_m:
@@ -1197,59 +1386,31 @@ class P0Suite:
         # -----------------------------------------------------------------
         print("\n--- Gate: EXP-P0-CAP (Diagnostic Probe Modes) ---")
 
+        # Badge-proven mode exercise: the in-memory option (assumed counter,
+        # synced by the badge-0 gate) advances via GUI clicks; each Done
+        # chain recompiles with the in-memory value (proven 2026-09-24), and
+        # the capture's badge color proves the rendered mode. The file is
+        # never consulted: proven non-persisting in-session on this stack.
         def goto_and_capture(
             gate_base: str,
             target_mode: int,
             scenario: str,
             observation: str,
-            settle: float = 0.8,
         ) -> None:
-            ok_cy, before, after, cyerr = self.cycle_to_mode(target_mode)
-            if not ok_cy or after != target_mode:
-                self.record_gate(
-                    f"{gate_base}_mode_change",
-                    "FAIL",
-                    f"PROBE_MODE did not reach {target_mode} (before={before}, after={after})",
-                    error=cyerr,
-                )
-                return
-            self.record_gate(
-                f"{gate_base}_mode_change",
-                "PASS",
-                f"PROBE_MODE reached {target_mode} (from {before}), persisted in optionsshaders.txt",
-            )
-            time.sleep(settle)
-            ok_s, _, serr = self.capture_screen(scenario, observation)
-            if not ok_s:
-                self.record_gate(f"{gate_base}_capture", "FAIL", f"{scenario} capture failed", error=serr)
-            else:
-                self.record_gate(f"{gate_base}_capture", "PASS", f"Captured {scenario} at PROBE_MODE={after}")
+            self.goto_mode_and_capture(gate_base, target_mode, scenario, observation)
 
         goto_and_capture(
             "mode1_hud", 1, "exp_p0_cap_mode1_uniforms_hud",
             "Mode 1 HUD verifying frameCounter heartbeat, frameTime bar, sunPosition, and worldTime",
         )
 
-        ok_cy, before, after, cyerr = self.cycle_to_mode(2)
-        if not ok_cy or after != 2:
-            self.record_gate("history_mode_change", "FAIL",
-                              f"PROBE_MODE did not reach 2 (before={before}, after={after})", error=cyerr)
-        else:
-            self.record_gate("history_mode_change", "PASS",
-                              f"PROBE_MODE reached 2 (from {before}), persisted in optionsshaders.txt")
-
-        # Mode 2 still: reuse the mode-2 state just reached, no extra cycle needed
-        # for the still itself, but the cycle gate above already proved entry.
-        time.sleep(1.5)
-        ok, _, err = self.capture_screen(
+        # Mode 2 still doubles as the mode-2 badge proof (history orange).
+        self.goto_mode_and_capture(
+            "history", 2,
             "exp_p0_history_still_persistent_trail",
             "Mode 2 persistent trailing arc in colortex3 confirming colortex3Clear = false",
         )
-        if not ok:
-            self.record_gate("capture_history_trail", "FAIL", "History still capture failed", error=err)
-        else:
-            self.record_gate("capture_history_trail", "PASS", "Captured History still screenshot")
-
+        time.sleep(1.5)
         ok_m, merr = self.perform_camera_motion(1.5)
         if not ok_m:
             self.record_gate("camera_motion_history", "FAIL", "History camera motion failed", error=merr)
@@ -1311,13 +1472,11 @@ class P0Suite:
             "deferred_pass", 5, "exp_p0_deferred_pass_confirmed",
             "Mode 5 green banner confirming deferred pass execution and RENY_DEFERRED_MAGIC communication",
         )
-        # Return to Mode 0 for dimensions (verified as well).
-        ok_cy, before, after, cyerr = self.cycle_to_mode(0)
-        if not ok_cy or after != 0:
-            self.record_gate("return_mode_cycle", "FAIL",
-                              f"Return to mode 0 not evidenced (before={before}, after={after})", error=cyerr)
-        else:
-            self.record_gate("return_mode_cycle", "PASS", f"Returned to PROBE_MODE 0 (from {before})")
+        # Return to Mode 0 for dimensions (badge-proven green render).
+        self.goto_mode_and_capture(
+            "return_mode", 0, "exp_p0_return_mode0_baseline",
+            "Mode 0 baseline render after diagnostic modes, before dimensions",
+        )
 
         # -----------------------------------------------------------------
         # 3. EXP-P0-DIM: fresh-log dimension transitions
@@ -1331,7 +1490,8 @@ class P0Suite:
                               error="; ".join(f"{c.path.name}: {c.error}" for c in bad))
         else:
             ok_c, evidence, cerr = self.send_chat_command_verified(
-                "/setblock ~ ~ ~ portal", CONFIRM_BLOCK_PLACED)
+                "/setblock ~ ~ ~ portal", CONFIRM_BLOCK_PLACED,
+                timeout=25.0, attempts=3)
             if not ok_c:
                 self.record_gate("dim_nether_command", "FAIL", "Server did not confirm Nether portal setblock", error=cerr)
             else:
@@ -1362,11 +1522,14 @@ class P0Suite:
                               error="; ".join(f"{c.path.name}: {c.error}" for c in bad))
         else:
             ok_c, evidence, cerr = self.send_chat_command_verified(
-                "/setblock ~ ~ ~ portal", CONFIRM_BLOCK_PLACED)
+                "/setblock ~ ~ ~ portal", CONFIRM_BLOCK_PLACED,
+                timeout=25.0, attempts=3)
             if not ok_c:
                 self.record_gate("dim_return_command", "FAIL", "Server did not confirm return portal setblock", error=cerr)
             else:
-                wait = wait_for_fresh_combined(cursors, dimension_pattern_for("overworld"), timeout=45.0)
+                # Return transfers proved slow (~60-80s, 2026-09-24): portal
+                # standing time + post-entry chunk-gen/shader load.
+                wait = wait_for_fresh_combined(cursors, dimension_pattern_for("overworld"), timeout=100.0)
                 if not wait.matched:
                     self.record_gate("dim_return_transition", "FAIL",
                                       f"Fresh Overworld return not observed: {wait.evidence}", error=wait.error)
@@ -1388,12 +1551,13 @@ class P0Suite:
                               error="; ".join(f"{c.path.name}: {c.error}" for c in bad))
         else:
             ok_c, evidence, cerr = self.send_chat_command_verified(
-                "/setblock ~ ~ ~ end_portal", CONFIRM_BLOCK_PLACED)
+                "/setblock ~ ~ ~ end_portal", CONFIRM_BLOCK_PLACED,
+                timeout=25.0, attempts=3)
             if not ok_c:
                 self.record_gate("dim_end_command", "FAIL", "Server did not confirm end portal setblock", error=cerr)
             else:
                 self.record_gate("dim_end_command", "PASS", f"End portal server-confirmed: {evidence}")
-                wait = wait_for_fresh_combined(cursors, dimension_pattern_for("end"), timeout=45.0)
+                wait = wait_for_fresh_combined(cursors, dimension_pattern_for("end"), timeout=90.0)
                 if not wait.matched:
                     self.record_gate("dim_end_transition", "FAIL",
                                       f"Fresh End transition not observed: {wait.evidence}", error=wait.error)
@@ -1412,8 +1576,9 @@ class P0Suite:
             self.record_gate("capture_end_smoke", "PASS", "Captured End smoke screenshot")
 
         # -----------------------------------------------------------------
-        # Final summary and manifest
+        # Final summary, attestations, and manifest
         # -----------------------------------------------------------------
+        self.write_attestations(tested_tree_sha)
         ok_w, werr = self.write_manifest(tested_tree_sha)
         if not ok_w:
             self.record_gate("manifest_write", "FAIL", "Manifest write failed", error=werr)
