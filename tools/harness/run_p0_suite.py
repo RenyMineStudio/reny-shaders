@@ -87,20 +87,139 @@ def run_checked(args: List[str], timeout: float = 30.0) -> CheckedResult:
 # measured against real screenshots of each OptiFine E7 screen; the
 # content origin comes from `xdotool getwindowgeometry`, which already
 # accounts for WM decorations).
-MENU_PAUSE_OPTIONS = (0.392, 0.642)
-MENU_OPTIONS_VIDEO = (0.313, 0.568)
-MENU_VIDEO_SHADERS = (0.313, 0.668)
-MENU_SHADERS_DONE = (0.500, 0.929)
-MENU_SHADERS_OPTIONS = (0.820, 0.930)
-MENU_SHADEROPTS_PROBE = (0.290, 0.250)
-MENU_SHADEROPTS_DONE = (0.710, 0.920)
-MENU_VIDEO_DONE = (0.500, 0.940)
-MENU_OPTIONS_DONE = (0.500, 0.890)
+#
+# 2026-09-24 recalibration: the pause-screen Options... row was re-measured
+# by pixel-band scan (Options row y 424-472, center 448; Save&Quit row
+# y 495-543). The old (0.392, 0.642) aimed 8px above the Options bottom
+# edge and, under the session pointer-frame offset (see pointer_corr_y),
+# landed on "Save and Quit to Title" — proven by a hover-highlight
+# screenshot. All constants below are row centers with >=20px margins.
+MENU_PAUSE_OPTIONS = (0.379, 0.622)
+MENU_OPTIONS_VIDEO = (0.3125, 0.576)
+MENU_VIDEO_SHADERS = (0.3125, 0.674)
+MENU_SHADERS_DONE = (0.505, 0.940)
+MENU_SHADERS_OPTIONS = (0.836, 0.940)
+MENU_SHADEROPTS_PROBE = (0.287, 0.264)
+MENU_SHADEROPTS_DONE = (0.699, 0.951)
+MENU_VIDEO_DONE = (0.500, 0.931)
+MENU_OPTIONS_DONE = (0.500, 0.896)
+# Measured pause-menu row centers in content pixels (1280x720): the pause
+# Options... click is hover-verified against this row before pressing.
+PAUSE_OPTIONS_ROW_PX = 448
 
 CONFIRM_TIME_SET = r"Set the time to"
 CONFIRM_TELEPORTED = r"Teleported RenyTester"
 CONFIRM_BLOCK_PLACED = r"Block placed"
 CONFIRM_SEED = r"Seed:"
+
+
+def _click_point(
+    geom: Tuple[int, int, int, int], rx: float, ry: float, corr_y: float = 0.0
+) -> Tuple[int, int]:
+    """Map content fractions to absolute screen pixels (pure, unit-tested).
+
+    corr_y is the session pointer-frame correction in pixels (measured live
+    by calibrate_pointer; negative when the client observes the pointer
+    higher than the xdotool content frame, e.g. ~-43 on this stack due to
+    the window-manager decoration offset inside MC's event coordinates).
+    """
+    x, y, width, height = geom
+    return (x + int(width * rx), y + int(height * ry) + int(round(corr_y)))
+
+
+def _find_highlight_center(image_path: Path) -> Optional[Tuple[int, int]]:
+    """Locate MC's blue button-hover highlight; return content-pixel center.
+
+    Returns None when no highlight band is present. Pure pixel scan, no
+    clicking. Requires Pillow; returns None (no highlight) when Pillow is
+    unavailable so callers fail closed on missing evidence, not on import.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        img = Image.open(image_path).convert("RGB")
+    except OSError:
+        return None
+    w, h = img.size
+    hot: List[int] = []
+    for yy in range(0, h, 2):
+        n = 0
+        for xx in range(340, min(941, w), 4):
+            r, g, b = img.getpixel((xx, yy))
+            if b > 140 and b > r + 40 and b > g + 20:
+                n += 1
+        if n > 25:
+            hot.append(yy)
+    if not hot:
+        return None
+    # Group contiguous hot rows; keep the tallest band (the hovered button).
+    bands: List[List[int]] = [[hot[0]]]
+    for yy in hot[1:]:
+        if yy - bands[-1][-1] <= 6:
+            bands[-1].append(yy)
+        else:
+            bands.append([yy])
+    best = max(bands, key=len)
+    xs: List[int] = []
+    mid = (best[0] + best[-1]) // 2
+    for xx in range(0, w, 4):
+        try:
+            r, g, b = img.getpixel((xx, mid))
+        except IndexError:
+            break
+        if b > 140 and b > r + 40 and b > g + 20:
+            xs.append(xx)
+    cx = (xs[0] + xs[-1]) // 2 if xs else w // 2
+    return (cx, (best[0] + best[-1]) // 2)
+
+
+def _measure_button_rows(image_path: Path) -> List[Tuple[int, int]]:
+    """Median-band scan of full-width button rows; returns (y0, y1) list."""
+    try:
+        from PIL import Image
+        import statistics
+    except ImportError:
+        return []
+    try:
+        img = Image.open(image_path).convert("RGB")
+    except OSError:
+        return []
+    w, _h = img.size
+    x0, x1, step = (450, min(831, w), 7)
+    if x1 - x0 < 100:
+        return []
+    rows: List[Tuple[int, int]] = []
+    cur: Optional[int] = None
+    yy = 0
+    while yy < 720:
+        vals = [
+            sum(img.getpixel((xx, y))) / 3
+            for y in range(yy, min(yy + 6, 720))
+            for xx in range(x0, x1, step)
+        ]
+        m = statistics.median(vals) if vals else 0
+        isbtn = m > 95
+        if isbtn and cur is None:
+            cur = yy
+        if not isbtn and cur is not None:
+            if yy - cur >= 18:
+                rows.append((cur, yy - 1))
+            cur = None
+        yy += 6
+    if cur is not None and 720 - cur >= 18:
+        rows.append((cur, 719))
+    return rows
+
+
+def _measure_button_rows_after_grab(suite: "P0Suite", name: str) -> Optional[List[Tuple[int, int]]]:
+    """Grab the window and measure full-width button rows (None on failure)."""
+    ok_s, shot, _ = suite.grab_window(name)
+    if not ok_s or shot is None:
+        return None
+    rows = _measure_button_rows(shot)
+    return rows or None
 
 
 def compute_sha256(path: Path) -> str:
@@ -411,6 +530,11 @@ class P0Suite:
         self.gates: List[GateResult] = []
         self.captures: List[Dict[str, Any]] = []
         self.overall_success = True
+        # Session pointer-frame correction in pixels (added to every click's
+        # screen Y). Measured live by calibrate_pointer(); 0.0 means
+        # uncalibrated (fail-closed callers must calibrate before menu nav).
+        self.pointer_corr_y: float = 0.0
+        self.pointer_calibrated: bool = False
 
     # -- gate bookkeeping ----------------------------------------------------
     def record_gate(self, name: str, status: str, evidence: str, error: Optional[str] = None) -> None:
@@ -432,8 +556,11 @@ class P0Suite:
         return windows[-1], None
 
     def get_window_geometry(self, win: str) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[str]]:
-        # Content origin + size via xdotool (accounts for WM decorations;
-        # xwininfo absolute coords alone miss by the decoration offset).
+        # Content origin + size via xdotool. NOTE: xdotool's Position is the
+        # WM frame origin; MC's pointer-event frame sits lower by the
+        # decoration height on this stack (measured live as pointer_corr_y by
+        # calibrate_pointer, ~-43px). click_relative applies that correction;
+        # raw fractions here are content fractions, never screen guesses.
         res = run_checked(["xdotool", "getwindowgeometry", win])
         if not res.ok:
             return None, f"getwindowgeometry failed: {res.error}"
@@ -473,9 +600,7 @@ class P0Suite:
         geom, gerr = self.get_window_geometry(w)
         if not geom:
             return False, gerr or "click aborted: no geometry"
-        x, y, width, height = geom
-        cx = x + int(width * rx)
-        cy = y + int(height * ry)
+        cx, cy = _click_point(geom, rx, ry, getattr(self, "pointer_corr_y", 0.0))
         # Proven delivery on this stack needs a real press hold (~0.3s);
         # 0.1s taps are silently swallowed by the LWJGL window.
         res = run_checked(["xdotool", "mousemove", str(cx), str(cy)])
@@ -491,6 +616,145 @@ class P0Suite:
             return False, f"click mouseup failed at ({cx},{cy}): {res.error}"
         time.sleep(delay)
         return True, None
+
+    def grab_window(self, name: str) -> Tuple[bool, Optional[Path], Optional[str]]:
+        """Screenshot the MC window to the screenshot dir WITHOUT manifest record.
+
+        Used for calibration/verification probes; evidence captures for gates
+        must go through capture_screen so the manifest stays complete.
+        """
+        w, err = self.get_window()
+        if not w:
+            return False, None, err or "grab aborted: no window"
+        path = self.screenshot_dir / f"_probe_{name}.png"
+        res = run_checked(["scrot", "-o", "-w", w, str(path)])
+        if not res.ok:
+            return False, None, f"scrot failed: {res.error}"
+        time.sleep(0.4)  # let a slow client render the hover state
+        return True, path, None
+
+    def calibrate_pointer(self) -> Tuple[bool, Optional[str]]:
+        """Measure the session pointer-frame Y correction (fail-closed).
+
+        Opens the pause menu (caller must guarantee in-game state), sweeps
+        hover probes across the Options/Save&Quit boundary, and solves the
+        correction from highlight evidence: corr = median(screen_y -
+        highlighted_row_center - origin_y). No clicks are issued, so a wrong
+        mapping can never press a destructive button. Leaves the game in the
+        pause menu; the caller returns via Back to Game / Escape.
+        """
+        ok, ferr = self.focus_window()
+        if not ok:
+            return False, f"calibration aborted, focus failed: {ferr}"
+        res = run_checked(["xdotool", "key", "Escape"])
+        if not res.ok:
+            return False, f"calibration aborted, Escape failed: {res.error}"
+        # Slow clients (heavy shader compile after world load) can take
+        # seconds to open the pause menu: poll for its layout, fail closed.
+        rows: List[Tuple[int, int]] = []
+        for _ in range(5):
+            time.sleep(2.5)
+            w, err = self.get_window()
+            if not w:
+                return False, err or "calibration aborted: no window"
+            geom, gerr = self.get_window_geometry(w)
+            if not geom:
+                return False, gerr or "calibration aborted: no geometry"
+            ok_g, grab, gerr2 = self.grab_window("cal_layout")
+            if not ok_g or grab is None:
+                return False, gerr2 or "calibration aborted: layout grab failed"
+            rows = _measure_button_rows(grab)
+            if len(rows) >= 4:
+                break
+        if len(rows) < 4:
+            return False, f"calibration aborted: pause layout unrecognized (rows={rows})"
+        ox, oy, width, height = geom
+        # Probe content-Y points spanning mid-menu rows; identify each lit
+        # highlight by snapping its center to the nearest measured row.
+        row_centers = sorted((a + b) // 2 for a, b in rows)
+        corrs: List[float] = []
+        for probe_cy in (400, 448, 480, 500, 519):
+            px = ox + int(width * 0.5)
+            py = oy + probe_cy
+            res = run_checked(["xdotool", "mousemove", "--sync", str(px), str(py)])
+            if not res.ok:
+                continue
+            time.sleep(2.5)  # slow-client render lag under heavy shaders
+            ok_s, shot, _ = self.grab_window(f"cal_probe_{probe_cy}")
+            if not ok_s or shot is None:
+                continue
+            hl = _find_highlight_center(shot)
+            if hl is None:
+                continue
+            nearest = min(row_centers, key=lambda c: abs(c - hl[1]))
+            if abs(nearest - hl[1]) > 25:
+                continue
+            corrs.append(float(py - nearest - oy))
+        if len(corrs) < 2:
+            return False, f"calibration aborted: insufficient highlight evidence ({len(corrs)} probes lit)"
+        corrs.sort()
+        self.pointer_corr_y = float(corrs[len(corrs) // 2])
+        if abs(self.pointer_corr_y) > 120:
+            self.pointer_corr_y = 0.0
+            return False, f"calibration rejected: implausible corr {corrs}"
+        self.pointer_calibrated = True
+        # Verify: the corrected Options... point must highlight its row.
+        if not self._hover_row_is(0.379, 0.622, 448, rows):
+            self.pointer_calibrated = False
+            self.pointer_corr_y = 0.0
+            return False, "calibration verification failed: corrected Options... hover missed its row"
+        return True, None
+
+    def _hover_row_is(self, rx: float, row_frac_y: float, row_px_y: int,
+                      rows: List[Tuple[int, int]]) -> bool:
+        """Move (corrected) to a menu point and check the highlight row."""
+        w, err = self.get_window()
+        if not w:
+            return False
+        geom, gerr = self.get_window_geometry(w)
+        if not geom:
+            return False
+        cx, cy = _click_point(geom, rx, row_frac_y, getattr(self, "pointer_corr_y", 0.0))
+        res = run_checked(["xdotool", "mousemove", "--sync", str(cx), str(cy)])
+        if not res.ok:
+            return False
+        time.sleep(2.5)
+        ok_s, shot, _ = self.grab_window("verify_hover")
+        if not ok_s or shot is None:
+            return False
+        hl = _find_highlight_center(shot)
+        if hl is None:
+            return False
+        return abs(hl[1] - row_px_y) <= 20
+
+    def click_verified_menu(
+        self, rx: float, row_frac_y: float, row_px_y: int, label: str,
+    ) -> Tuple[bool, Optional[str]]:
+        """Hover-verify a menu target, then click it (fail-closed).
+
+        The pointer is moved to the corrected point and the hover highlight
+        must sit on the expected row before any button press is issued. A
+        mismatch aborts WITHOUT clicking, so a stale mapping can never press
+        a destructive button (e.g. Save&Quit instead of Options...).
+        Requires a prior successful calibrate_pointer().
+        """
+        if not getattr(self, "pointer_calibrated", False):
+            return False, f"click {label} refused: pointer uncalibrated"
+        w, err = self.get_window()
+        if not w:
+            return False, err or f"click {label} aborted: no window"
+        geom, gerr = self.get_window_geometry(w)
+        if not geom:
+            return False, gerr or f"click {label} aborted: no geometry"
+        rows = _measure_button_rows_after_grab(self, f"pre_{label}")
+        if rows is None:
+            return False, f"click {label} aborted: layout unreadable"
+        if not self._hover_row_is(rx, row_frac_y, row_px_y, rows):
+            return False, (
+                f"click {label} refused: hover highlight missed row y={row_px_y} "
+                "(mapping stale; recalibrate before retrying)"
+            )
+        return self.click_relative(rx, row_frac_y, delay=1.0)
 
     def send_chat_command(self, command: str) -> Tuple[bool, Optional[str]]:
         w, err = self.get_window()
@@ -633,8 +897,17 @@ class P0Suite:
                 time.sleep(sleep_after)
 
         step(["xdotool", "key", "Escape"], 1.5)
+        # The pause-screen Options... click is destructive-adjacent (one row
+        # above Save&Quit): hover-verify before pressing. Inner-menu targets
+        # use corrected clicks; their worst case is a wrong submenu, which
+        # the fresh-log evidence wait below catches as FAIL (never a quit).
+        ok_c, cerr = self.click_verified_menu(
+            MENU_PAUSE_OPTIONS[0], MENU_PAUSE_OPTIONS[1],
+            PAUSE_OPTIONS_ROW_PX, "Options...",
+        )
+        if not ok_c:
+            return False, "", f"reload aborted, pause nav unsafe: {cerr}"
         nav = [
-            (MENU_PAUSE_OPTIONS, 0.8, "Options..."),
             (MENU_OPTIONS_VIDEO, 0.8, "Video Settings..."),
             (MENU_VIDEO_SHADERS, 1.0, "Shaders..."),
         ]
@@ -680,8 +953,13 @@ class P0Suite:
         if not res.ok:
             failures.append(f"Escape -> {res.error}")
         time.sleep(1.5)
+        ok_c, cerr = self.click_verified_menu(
+            MENU_PAUSE_OPTIONS[0], MENU_PAUSE_OPTIONS[1],
+            PAUSE_OPTIONS_ROW_PX, "Options...",
+        )
+        if not ok_c:
+            return False, before, None, f"mode cycle aborted, pause nav unsafe: {cerr}"
         nav = [
-            (MENU_PAUSE_OPTIONS, 0.8, "Options..."),
             (MENU_OPTIONS_VIDEO, 0.8, "Video Settings..."),
             (MENU_VIDEO_SHADERS, 1.0, "Shaders..."),
             (MENU_SHADERS_OPTIONS, 1.2, "Shader Options..."),
@@ -836,6 +1114,35 @@ class P0Suite:
             self.write_manifest(tested_tree_sha)
             return 1
         self.record_gate("player_in_game_fixture", "PASS", "Player in-game (/seed answered)")
+
+        # Pointer calibration: measure the session pointer-frame Y correction
+        # before ANY menu navigation. Without it, pause-menu clicks land on
+        # "Save and Quit to Title" (proven 2026-09-24 by hover-highlight
+        # evidence) and the suite quits its own world. Abort loudly here
+        # rather than navigating blind.
+        ok_cal, cerr = self.calibrate_pointer()
+        if not ok_cal:
+            self.record_gate("pointer_calibration", "FAIL",
+                              "Pointer calibration failed; menu nav unsafe, aborting",
+                              error=cerr)
+            self.write_manifest(tested_tree_sha)
+            return 1
+        self.record_gate("pointer_calibration", "PASS",
+                          f"Pointer-frame correction measured: {self.pointer_corr_y:.0f}px")
+        res_esc = run_checked(["xdotool", "key", "Escape"])  # leave pause menu
+        if not res_esc.ok:
+            self.record_gate("pointer_calibration", "FAIL",
+                              "Could not leave pause menu after calibration",
+                              error=res_esc.error)
+            self.write_manifest(tested_tree_sha)
+            return 1
+        ok_g, gerr = self.ensure_in_game(tries=2)
+        if not ok_g:
+            self.record_gate("pointer_calibration", "FAIL",
+                              "Not back in-game after calibration",
+                              error=gerr)
+            self.write_manifest(tested_tree_sha)
+            return 1
 
         # -----------------------------------------------------------------
         # 1. EXP-P0-STACK: Overworld baseline

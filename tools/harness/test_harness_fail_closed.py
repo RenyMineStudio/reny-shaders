@@ -348,6 +348,64 @@ def test_generic_reinit_does_not_prove_dimension_target() -> None:
           "target patterns include explicit dimension ids")
 
 
+def test_click_point_applies_session_correction() -> None:
+    """Content fractions map to screen pixels with the session correction."""
+    from run_p0_suite import _click_point
+    check("click_point_no_corr",
+          _click_point((650, 131, 1280, 720), 0.379, 0.622) == (650 + 485, 131 + 447),
+          f"{_click_point((650, 131, 1280, 720), 0.379, 0.622)}")
+    check("click_point_with_corr",
+          _click_point((650, 131, 1280, 720), 0.379, 0.622, -38.0) == (650 + 485, 131 + 447 - 38),
+          f"{_click_point((650, 131, 1280, 720), 0.379, 0.622, -38.0)}")
+    check("click_point_default_zero",
+          _click_point((0, 0, 1280, 720), 0.5, 0.5) == (640, 360),
+          f"{_click_point((0, 0, 1280, 720), 0.5, 0.5)}")
+
+
+def test_highlight_and_row_measurement_on_synthetic_menu() -> None:
+    """Blue-hover detection and gray-row scan work on a synthetic menu."""
+    try:
+        from PIL import Image
+    except ImportError:
+        check("synthetic_menu_requires_pillow", False, "Pillow unavailable")
+        return
+    import tempfile
+    from run_p0_suite import _find_highlight_center, _measure_button_rows
+    img = Image.new("RGB", (1280, 720), (40, 30, 25))
+    px = img.load()
+    for y in range(424, 472):
+        for x in range(340, 941):
+            px[x, y] = (150, 150, 150)
+    for y in range(495, 543):
+        for x in range(340, 941):
+            px[x, y] = (120, 130, 235)  # hovered (blue) row
+    with tempfile.NamedTemporaryFile("wb", suffix=".png", delete=False) as f:
+        img.save(f.name)
+        shot = Path(f.name)
+    try:
+        rows = _measure_button_rows(shot)
+        centers = sorted((a + b) // 2 for a, b in rows)
+        check("synthetic_rows_measured",
+              len(centers) == 2 and abs(centers[0] - 448) <= 4 and abs(centers[1] - 519) <= 4,
+              f"rows={rows}")
+        hl = _find_highlight_center(shot)
+        check("synthetic_highlight_found",
+              hl is not None and abs(hl[1] - 519) <= 4,
+              f"highlight={hl}")
+    finally:
+        shot.unlink(missing_ok=True)
+
+
+def test_verified_menu_click_refuses_when_uncalibrated() -> None:
+    """A destructive-adjacent menu click never fires without calibration."""
+    from run_p0_suite import P0Suite
+    suite = P0Suite.__new__(P0Suite)
+    ok, err = suite.click_verified_menu(0.379, 0.622, 448, "Options...")
+    check("verified_click_refuses_uncalibrated",
+          ok is False and err is not None and "uncalibrated" in err,
+          f"ok={ok}, err={err}")
+
+
 def test_probe_mode_parser_handles_real_lines() -> None:
     """Real PROBE_MODE evidence through parse_shader_logs must not raise."""
     log = "PROBE_MODE registered\nPROBE_MODE changed: 1\n"
@@ -472,6 +530,9 @@ def main() -> int:
     test_world_capability_negative_control()
     test_world_capability_positive_control()
     test_overworld_pattern_uses_target_specific_marker()
+    test_click_point_applies_session_correction()
+    test_highlight_and_row_measurement_on_synthetic_menu()
+    test_verified_menu_click_refuses_when_uncalibrated()
     print(f"\n{PASS_COUNT} negative controls passed, {len(FAILURES)} failed: {FAILURES}")
     return 0 if not FAILURES else 1
 
