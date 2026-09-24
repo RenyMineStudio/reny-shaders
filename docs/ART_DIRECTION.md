@@ -177,6 +177,57 @@ Aumenta qualidade dentro da mesma arquitetura:
 
 Showcase não pode virar outro shaderpack.
 
+
+## Estudo visual: atmosfera dark fantasy por profundidade
+
+**Status: VISUAL RESEARCH — NON-NORMATIVE.**
+
+Esta seção registra uma referência visual discutida em 2026-09-24. O material-fonte não é versionado no repositório e não constitui licença, dependência, especificação técnica ou alvo de cópia. O objetivo é preservar os princípios perceptivos observados antes que decisões de implementação sejam tomadas.
+
+### Observações úteis
+
+A referência reforça uma direção compatível com a identidade Reny:
+
+- a sensação de escala vem principalmente da separação entre foreground, midground e background;
+- atmospheric perspective forte pode carregar mais identidade que efeitos screen-space caros;
+- sky, fog, exposição e color grading formam a maior parte do mood percebido;
+- foreground deve preservar contraste e leitura local enquanto a distância perde contraste e detalhe progressivamente;
+- mundo natural frio/desaturado pode reservar saturação e luminância para magia, lava, portais, Tensura e outros emissivos;
+- água escura e integrada ao ambiente pode funcionar melhor que reflexos ostensivos;
+- arquitetura distante ganha presença por silhueta e absorção atmosférica, sem exigir iluminação local complexa;
+- noite pode ser muito escura desde que geometria e navegação próximas continuem legíveis.
+
+### Guardrails extraídos da referência
+
+Não promover a estética observada literalmente para o Default.
+
+Em particular:
+
+- não comprimir o mundo natural até uma paleta quase monocromática;
+- não permitir que fog vire uma parede uniforme próxima da câmera;
+- não aceitar black crush que destrua informação necessária ao gameplay;
+- não confundir aparência volumétrica com requisito de volumetria raymarched;
+- não inferir necessidade de SSR, GI, PBR completo ou passes dedicados apenas porque a referência parece visualmente rica.
+
+A hipótese preferida é obter sensação equivalente com uma cadeia barata:
+
+> sky/atmosfera → fog por distância/altura quando viável → exposição/tonemapping → iluminação direcional → água simples → sombras próximas → detalhe secundário
+
+Essa ordem é uma **hipótese de retorno visual por custo**, não um contrato de pipeline.
+
+### Promoção para decisão canônica
+
+Qualquer princípio desta seção só deve virar requisito, parâmetro ou implementação depois de:
+
+1. capability relevante ser confirmada no stack Minecraft 1.7.10 alvo;
+2. existir protótipo mínimo reproduzível;
+3. cenas comparáveis demonstrarem ganho visual;
+4. benchmark mostrar custo aceitável em hardware modesto/iGPU;
+5. movimento, noite e condições de baixa visibilidade preservarem gameplay;
+6. a solução manter espaço visual para sobrenatural/emissivos dominarem quando necessário.
+
+Até esses gates, esta seção deve orientar exploração visual, não arquitetura.
+
 ## Anti-objetivos
 
 Não perseguir por padrão:
