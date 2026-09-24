@@ -61,27 +61,50 @@ Proveniência exata (tested tree SHA, gates e delta allowlisted) em
 `benchmarks/reports/p0_probe_report.json` / `.md` e
 `benchmarks/artifacts/p0_probe/MANIFEST.md`.
 
-### Preflight semântico MCP
+### Preflight e integração semântica MCP
 
-O repositório possui integração project-local com o `minecraft-dev-toolkit` em
-`opencode.json`, `.opencode/plugins/minecraft-mcp-guard.js` e `.omp/mcp.json`.
-No preflight real de 2026-09-22, o bridge Forge standalone foi carregado no cliente e o
-transporte MCP respondeu:
+As evidências MCP são limitadas às fronteiras abaixo; não substituem os gates
+do Forge nem do shaderpack.
 
-- `minecraft_ping` → `{"ok":true}`;
-- `minecraft_get_capabilities` → superfície core completa;
-- `minecraft_get_client_state` → snapshot estruturado;
-- `minecraft_get_runtime_info` e `minecraft_get_player_state` → sem
-  `ECONNREFUSED`.
+- **MCP discovery:** OpenCode V2 usa `opencode.json` e seu plugin
+  project-local; OMP 18.3.0 usa `.omp/mcp.json` project-local e a extensão
+  project-local `.omp/extensions/minecraft-mcp-guard.js`. São configurações
+  independentes para o mesmo servidor `minecraft-dev`. O bootstrap canônico
+  `node ../minecraft-dev-toolkit/bootstrap/src/cli.js --consumer . --clients both`
+  foi repetido e retornou `updated: false` para os alvos OpenCode e OMP.
+  `opencode mcp list` mostrou `minecraft-dev connected`.
+- **MCP transport:** discovery/conectividade prova somente que o processo MCP
+  está configurado/conectável. Não prova que o bridge Forge, um mundo ou uma
+  capability visual estejam disponíveis. `minecraft_get_capabilities` lista
+  capabilities e não cria evidência semântica.
+- **OMP native guard enforcement:** a extensão OMP gerada no Reny delega ao
+  entrypoint canônico do MDT; o plugin OpenCode project-local também referencia
+  a política compartilhada. No MDT
+  `9cc91c0233eca8fdb656cc07bc74ff01457be52c`, o comando
+  `node --test integrations/omp/minecraft-mcp-guard/test/extension.test.js bootstrap/test/omp-smoke.test.js`
+  passou 7/7 em OMP 18.3.0. Esse smoke canônico prova o enforcement OMP no
+  harness de teste do MDT, incluindo fail-closed antes de evidência, resultado
+  MCP real elegível, fallback elegível e isolamento por sessão. A extensão
+  wrapper project-local do Reny está instalada; não se declara um smoke de
+  enforcement executado dentro de uma sessão OMP do consumidor Reny.
+  Ações de pixel permanecem bloqueadas até sucesso MCP semântico atribuído na
+  sessão atual ou fallback de erro de bridge elegível. `computer.run` continua
+  protegido mesmo com `read_only: true`; essa flag não é sandbox. O estado de
+  autorização é isolado por sessão.
+- **Forge runtime availability:** MCP discovery/transport não atesta que o
+  Forge bridge está carregado nem que há cliente/mundo disponível. O preflight
+  semântico anterior registrou `minecraft_ping`, estado do cliente e estado do
+  jogador em 2026-09-22; esses dados não promovem capabilities atuais nem
+  substituem a execução relevante para um gate.
+- **Shader/render evidence:** esta integração não prova compilação GLSL,
+  capability do OptiFine, `world<id>`, formatos de buffer, frame time,
+  performance de GPU ou correção visual. Esses claims dependem do harness,
+  logs, screenshots e benchmark do Reny Shaders; permanecem sujeitos à
+  proveniência e aos gates P0 correspondentes.
 
-Isso prova somente o canal semântico e não promove capability visual a PASS.
-Screenshots, logs e execução de `run_p0_suite.py` continuam obrigatórios para
-claims visuais/GPU. No OMP 18.2.8, `/mcp reload` descobriu o servidor project-local,
-`/mcp list` mostrou `minecraft-dev` conectado via stdio e `/mcp test minecraft-dev`
-conectou ao servidor `minecraft-dev v0.1.0` com 11 tools. Isso prova discovery e
-transporte MCP no OMP, não disponibilidade de cada capability no cliente Forge.
-A lacuna de navegação GUI registrada em `minecraft-dev-toolkit#16` foi concluída
-upstream; a P0 ainda requer reexecução completa no stack alvo.
+A política OMP compartilhada é originária do MDT canônico
+`9cc91c0233eca8fdb656cc07bc74ff01457be52c`; nenhuma capability específica de
+shader foi adicionada ao core ou inferida a partir do MCP.
 
 > **Proveniência:** os itens de execução abaixo são registro histórico pré-hardening e permanecem **PENDING REVALIDATION** até um relatório gerado pela suite completa com tree SHA, bridge MCP e gates target-specific. Não promovê-los a CONFIRMED no PR atual.
 
