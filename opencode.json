@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "servers": {
+      "minecraft-dev": {
+        "type": "local",
+        "command": [
+          "node",
+          "../minecraft-dev-toolkit/mcp/src/index.js"
+        ]
+      }
+    }
+  }
+}

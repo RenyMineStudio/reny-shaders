@@ -1,0 +1,156 @@
+{
+  "timestamp": "2026-09-22T18:44:12.306383+00:00",
+  "tested_tree_sha": "cb02cce",
+  "report_head_sha": "cb02cced113ef3ce6fd3b54aa69a7ed0278b63d3",
+  "working_tree_clean_at_report": true,
+  "evidence_delta": {
+    "from": "cb02cce",
+    "to": "cb02cced113ef3ce6fd3b54aa69a7ed0278b63d3",
+    "files": [],
+    "allowlisted_only": true,
+    "error": null,
+    "allowlist": [
+      "benchmarks/artifacts/p0_probe/MANIFEST.md",
+      "benchmarks/reports/p0_probe_report.json",
+      "benchmarks/reports/p0_probe_report.md"
+    ]
+  },
+  "provenance_note": "tested_tree_sha is the tree actually executed by the suite. If report_head_sha is ahead, the delta must contain only allowlisted evidence files; otherwise the provenance claim is invalid.",
+  "target_stack": {
+    "minecraft": "1.7.10",
+    "forge": "10.13.4.1614",
+    "optifine": "1.7.10 HD U E7",
+    "java": "openjdk version \"1.8.0_312\""
+  },
+  "hardware_environment": {
+    "gpu": "Mesa Intel(R) Iris(R) Xe Graphics (ADL GT2)",
+    "gpu_vendor": "Intel",
+    "driver": "4.6 (Compatibility Profile) Mesa 25.2.8-0ubuntu0.24.04.2",
+    "glsl": "4.60",
+    "os": "Linux",
+    "kernel": "Linux 7.0.0-30-generic x86_64"
+  },
+  "probe_mode_persisted": 0,
+  "log_analysis": {
+    "pack_loaded": false,
+    "pack_name": null,
+    "worlds_detected": null,
+    "block_mapping_parsed": false,
+    "block_mapping_accepted_ids": [],
+    "block_mapping_warnings": [],
+    "block_mapping_invalid_ids": [],
+    "probe_mode_registration": false,
+    "world_folder_loads": [],
+    "uniforms_exercised": false,
+    "custom_uniforms": [],
+    "buffer_formats": {},
+    "skip_clear_buffers": [],
+    "ping_pong_flips": [],
+    "programs_loaded": [],
+    "programs_disabled": [],
+    "custom_textures_loaded": [],
+    "custom_noise_loaded": false,
+    "framebuffer_created": false,
+    "errors": [],
+    "warnings": [],
+    "log_sources_parsed": [
+      "/home/pedro/Documents/curseforge/minecraft/Instances/Reny Shaders Probe/logs/latest.log"
+    ]
+  },
+  "capabilities": {
+    "EXP-P0-STACK": {
+      "status": "INCONCLUSIVE",
+      "description": "Forge 1614 + OptiFine E7 minimal pipeline execution on target hardware",
+      "evidence": "Insufficient log evidence for full stack execution",
+      "notes": "Overworld/Nether/End execution is evidenced by the P0 suite gates, not by this predicate alone"
+    },
+    "deferred": {
+      "status": "INCONCLUSIVE",
+      "description": "Deferred pass stage loaded between terrain and translucent passes",
+      "evidence": "Program 'deferred' absent from runtime log",
+      "notes": "Inter-pass data flow is a separate visual-manifest observation, not proven by load lines"
+    },
+    "composite": {
+      "status": "INCONCLUSIVE",
+      "description": "Post-translucent composite stage loaded",
+      "evidence": "Program 'composite' absent from runtime log",
+      "notes": "Runs at display resolution in E7; no scaling is claimed"
+    },
+    "final": {
+      "status": "INCONCLUSIVE",
+      "description": "Final presentation pass loaded",
+      "evidence": "Program 'final' absent from runtime log",
+      "notes": "HUD content is evidenced by captures listed in the manifest"
+    },
+    "shadow": {
+      "status": "INCONCLUSIVE",
+      "description": "Directional shadow depth pass loaded",
+      "evidence": "Program 'shadow' absent from runtime log",
+      "notes": "Minimal shadow pass compiled without observed error"
+    },
+    "world<id>": {
+      "status": "INCONCLUSIVE",
+      "description": "OptiFine E7 world<id> dimension routing",
+      "evidence": "No target-specific world<id> runtime evidence",
+      "notes": "Generic renderer reset/reload lines do not prove dimension routing"
+    },
+    "includes": {
+      "status": "INCONCLUSIVE",
+      "description": "GLSL #include preprocessor directive support in E7",
+      "evidence": "No compile evidence confirming include resolution",
+      "notes": "Depth-10 nesting is parser documentation, not measured here"
+    },
+    "profiles/options": {
+      "status": "INCONCLUSIVE",
+      "description": "Profile declarations and PROBE_MODE option registration/persistence",
+      "evidence": "profiles/options unproven: requires registration, at least two observed mode values, and persisted value; registration=False, transitions=[], persisted=optionsshaders.txt persists PROBE_MODE:0",
+      "notes": "Mode-cycle persistence is additionally evidenced by suite mode_change gates"
+    },
+    "block.properties (vanilla)": {
+      "status": "INCONCLUSIVE",
+      "description": "Vanilla block ID alias mapping accepted without rejection",
+      "evidence": "Vanilla mapping unproven: parser acceptance for expected IDs missing (['block.100', 'block.101', 'block.102', 'block.103', 'block.104', 'block.105', 'block.106', 'block.107', 'block.108', 'block.109']); source_error=None",
+      "notes": "mc_Entity.x transport is shader-source fact, verified visually in Mode 3 captures"
+    },
+    "Forge mod block mapping": {
+      "status": "INCONCLUSIVE / UNPROVEN",
+      "description": "Forge namespaced block ID mapping (e.g. thaumcraft:*)",
+      "evidence": "Modded block coverage not exercised in clean baseline environment",
+      "notes": "Requires modded workload; not claimed here"
+    },
+    "custom textures / noise": {
+      "status": "INCONCLUSIVE / UNPROVEN",
+      "description": "Custom textures and noise texture loading",
+      "evidence": "Custom texture/noise assets not loaded or not logged in this probe run",
+      "notes": "Mechanism documented in E7 parser docs; assets unexercised in P0 minimal probe"
+    },
+    "buffer_formats (FP16 / R11F)": {
+      "status": "INCONCLUSIVE",
+      "description": "Wide/compact buffer formats accepted by driver",
+      "evidence": "No buffer format lines observed in log",
+      "notes": "FBO completeness is inferred from absence of errors plus rendered captures"
+    },
+    "colortex_skip_clear": {
+      "status": "INCONCLUSIVE",
+      "description": "Skip framebuffer clear on colortex3 (colortex3Clear = false)",
+      "evidence": "No 'clear disabled' line observed in log",
+      "notes": "Temporal persistence across frames is evidenced by Mode 2 captures in the manifest"
+    },
+    "frameCounter / frameTime": {
+      "status": "INCONCLUSIVE",
+      "description": "Built-in frame counter and frame delta time uniforms exercised",
+      "evidence": "Uniform exercise unproven: pack load unobserved; Mode 1 uniform exercise not observed",
+      "notes": "Heartbeat/bar motion is a visual-manifest observation, not a log predicate"
+    },
+    "scale.<program>": {
+      "status": "REJECTED IN E7",
+      "description": "Internal composite/deferred program downscaling directive",
+      "evidence": "Inspected Shaders.class and ShaderPackParser.class in OptiFine E7 jar: scale.<program> symbols absent (composite-scale commit 5b0151b4 is 2018, post-E7)",
+      "notes": "Scaling added upstream in 2018, post-E7; E7 packs must not rely on it"
+    }
+  },
+  "mandatory_failures": [],
+  "anecdotal_observations": {
+    "note": "FPS values from the F3 screen are anecdotal host observations only, not reproducible GPU timer benchmarks, and must not be cited as frame-time conclusions."
+  }
+}

@@ -48,6 +48,10 @@ Sucesso:
 
 Falha bloqueia a baseline atual.
 
+**Registro histórico (2026-09-18, pré-hardening): PENDING REVALIDATION**
+- Este resultado antecede os gates fail-closed de cursor, rotação, semântica MCP e evidência target-specific de dimensões.
+- Não é prova atual de 19 programas, dimensões, resize ou estabilidade visual; o novo relatório só promove claims após suite completa com provenance.
+
 ### EXP-P0-CAP — capability probe versionado
 
 Testar isoladamente:
@@ -67,13 +71,16 @@ Testar isoladamente:
 Saída versionada:
 
 ~~~text
-capability
-stack/version
-hardware
-driver
-pass|fail
-observations
+capability: [nome da capability]
+stack/version: Minecraft 1.7.10 / Forge 10.13.4.1614 / OptiFine HD U E7
+hardware: Mesa Intel(R) Iris(R) Xe Graphics (ADL GT2)
+driver: 4.6 (Compatibility Profile) Mesa 25.2.8
+pass|fail: PASS | REJECTED
+observations: [detalhes observados no cliente real]
 ~~~
+
+Relatório gerado em `benchmarks/reports/p0_probe_report.md` e JSON estruturado em `benchmarks/reports/p0_probe_report.json`.
+Evidências visuais capturadas em `benchmarks/artifacts/p0_probe/`.
 
 ### EXP-P0-MATERIAL — cobertura modded
 
@@ -122,7 +129,20 @@ Eventos obrigatórios:
 
 Saída: tabela de validade/reset.
 
-Se reset seguro não puder ser garantido, history local continua bloqueado.
+**Tabela de validade e reset observada no stack real (2026-09-18):**
+
+| Evento | Comportamento Observado | Classificação | Implicação de Arquitetura |
+|---|---|---|---|
+| Câmera parada | Rastro suave e contínuo de 25–30 frames decaindo via `prev * 0.96` | Persistência válida | Primitiva funcional para acumulação estável |
+| Movimento de câmera | O rastro persiste no espaço de tela sem corrupção ou rasgos | Persistência válida | Acumulação em coordenadas de tela requer reprojeção para dados mundiais |
+| Window resize | FBO e buffers são recriados na nova resolução; histórico reinicia | Reset limpo | Sem vazamento de memória ou distorção de aspecto |
+| Shader reload (GUI / F3+R) | Shaders recompilam e o framebuffer é limpo | Reset limpo | Sem estado residual |
+| FOV change | Projeção altera; buffer em screen-space permanece estável | Persistência válida | Mudança de FOV preserva integridade do buffer |
+| Teleporte | O histórico em tela NÃO é limpo automaticamente pelo host | Conteúdo antigo reutilizado | Shader MUST detectar corte de câmera (`distance(camPos, prevCamPos) > threshold`) para resetar histórico |
+| Troca de dimensão | `checkWorldChanged` chama `Shaders.uninit()`, reinicializando buffers | Reset limpo | Sem contaminação entre Overworld, Nether e End |
+| Alteração de opção/preset | Shaders recompilam e o framebuffer é reinicializado | Reset limpo | Transição segura |
+
+Se reset seguro não puder ser garantido, history local continua bloqueado. Com o descarte explícito em descontinuidade de câmera, primitivas temporais pontuais são desbloqueadas para investigação.
 
 ### EXP-P0-SHADOW-COST — custo bruto
 
